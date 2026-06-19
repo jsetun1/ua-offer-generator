@@ -1,1 +1,74 @@
-
+UA Offer Generator – online varianta přes Streamlit Community Cloud
+Tato verze je připravená pro spuštění jako webová aplikace v prohlížeči.
+Co aplikace dělá
+Nahraje master data, lokální sklad 101, lokální sklad 501 a centrální sklad.
+Páruje položky podle EAN.
+Centrální sklad počítá jako součet prvních dvou sloupců dostupnosti typu Week.
+Filtruje produkty podle typu, pohlaví, barvy, MOC CZK, skladové dostupnosti, sezony, end use a C/O.
+Pro technická trika umí vyloučit produkty, kde Composition obsahuje cotton.
+Vygeneruje Excel obchodní nabídku s prázdným sloupcem ORDER.
+Důležité k bezpečnosti dat
+Do GitHub repozitáře nahrávejte pouze kód aplikace:
+app.py
+offer_core.py
+requirements.txt
+složku .streamlit
+README_ONLINE_CZ.md
+Nenahrávejte do GitHubu skladová data, master data, ceníky ani produktové databáze.
+Aplikace podle aktuálního kódu nahrané Excel soubory neukládá do repozitáře ani do trvalého úložiště. Zpracuje je v rámci běžící webové aplikace a vytvoří výstupní Excel ke stažení. Přesto platí, že při použití veřejného cloudu data technicky procházejí infrastrukturou dané cloudové služby. Pro citlivá ostrá data je vhodnější interní server nebo schválené firemní cloudové prostředí.
+Varianta A: rychlý test přes Streamlit Community Cloud
+Přihlaste se do GitHubu.
+Vytvořte nový repozitář, ideálně privátní, například `ua-offer-generator`.
+Nahrajte do něj soubory z této složky.
+Neuploadujte žádné Excel soubory s daty.
+Otevřete `share.streamlit.io`.
+Přihlaste se přes GitHub.
+Zvolte Deploy app.
+Vyberte repozitář `ua-offer-generator`.
+Branch: `main`.
+Main file path: `app.py`.
+Klikněte na Deploy.
+Po nasazení vznikne URL adresa aplikace. V aplikaci pak nahrajete čtyři Excel soubory a stáhnete vygenerovanou nabídku.
+Vstupní soubory
+Aplikace čeká tyto čtyři soubory:
+Master data
+EAN
+Artikl
+Size US / Size
+Název
+MOC CZK
+MOC EUR
+Gender
+Division
+Silhouette
+Detail silhouette
+Fit
+End use
+Season
+C/O
+Color group
+Color name
+Composition
+Lokální sklad 101
+EAN poslední nebo EAN
+Qty
+Lokální sklad 501
+EAN poslední nebo EAN
+Qty
+Centrální sklad
+EAN
+alespoň dva sloupce začínající na Week, například Week 25 a Week 26
+Testovací filtr
+Pro původní test použijte:
+Product type: Technical T-shirts
+Gender: Mens
+Color group / color logic: Black + Dark Blue
+MOC CZK to: 999
+Exclude cotton: zaškrtnuto
+Availability source: Local 101 + Local 501 + Central
+Minimum selected availability per EAN: 1
+Omezení první verze
+Obrázky produktů nejsou zatím zapojené.
+Dark Blue se určuje podle Color name obsahujícího Navy, Midnight nebo Academy.
+Technická trika jsou definována přes Apparel + Tops + sleeve/tee detail + Composition bez cotton.
+Výstupní Excel je funkční obchodní tabulka, zatím ne grafická produktová prezentace.
