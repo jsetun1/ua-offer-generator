@@ -50,6 +50,9 @@ def main() -> None:
     gender_options = unique_sorted(data, "Gender")
     detail_silhouette_options = unique_sorted(data, "Detail silhouette")
     fit_options = unique_sorted(data, "Fit")
+    moc_eur_max_default = int(max(float(data["MOC EUR"].max()) if "MOC EUR" in data.columns and not data["MOC EUR"].empty else 0, 0))
+    if moc_eur_max_default <= 0:
+        moc_eur_max_default = 999
 
     with col1:
         product_types = st.multiselect(
@@ -67,6 +70,8 @@ def main() -> None:
         )
         price_min = st.number_input("MOC CZK from", min_value=0, value=0, step=100)
         price_max = st.number_input("MOC CZK to", min_value=0, value=999, step=100)
+        price_eur_min = st.number_input("MOC EUR from", min_value=0, value=0, step=5)
+        price_eur_max = st.number_input("MOC EUR to", min_value=0, value=moc_eur_max_default, step=5)
     with col3:
         selected_warehouses = st.multiselect(
             "Availability source used for filtering",
@@ -91,6 +96,8 @@ def main() -> None:
         colors=colors,
         price_min=float(price_min),
         price_max=float(price_max),
+        price_eur_min=float(price_eur_min),
+        price_eur_max=float(price_eur_max),
         selected_warehouses=selected_warehouses,
         min_total_available=int(min_total_available),
         seasons=seasons,
@@ -106,11 +113,12 @@ def main() -> None:
     offer_df = to_offer_table(filtered, include_extra_columns=include_extra_columns)
 
     st.header("3. Preview")
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
     kpi1.metric("EAN rows", f"{len(offer_df):,}")
     kpi2.metric("Unique articles", f"{offer_df['Artikl'].nunique() if not offer_df.empty else 0:,}")
     kpi3.metric("Total available", f"{int(filtered['Total available'].sum()) if not filtered.empty else 0:,}")
     kpi4.metric("Average MOC CZK", f"{filtered['MOC CZK'].mean():,.0f}" if not filtered.empty else "-")
+    kpi5.metric("Average MOC EUR", f"{filtered['MOC EUR'].mean():,.0f}" if not filtered.empty else "-")
 
     st.dataframe(offer_df.head(500), use_container_width=True, hide_index=True)
     if len(offer_df) > 500:
@@ -140,6 +148,8 @@ def main() -> None:
             **Sleeve / detail silhouette** filters exact values from `Detail silhouette`, for example Short-Sleeves or Long-Sleeves.
 
             **Fit** filters exact values from `Fit`, for example Loose, Fitted or Compression.
+
+            **MOC CZK** and **MOC EUR** filters are applied together. Set a wide range if you do not want one of them to restrict the result.
 
             **Exclude cotton** removes rows where `Composition` contains `cotton`.
 
