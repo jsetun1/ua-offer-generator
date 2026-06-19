@@ -19,7 +19,7 @@ OUTPUT_COLUMNS = [
     "Fit", "End use", "Season", "C/O",
 ]
 
-EXTRA_COLUMNS = ["MOC CZK", "Color group", "Color name", "Composition", "Total available"]
+EXTRA_COLUMNS = ["MOC CZK", "Color group", "Color name", "Color code", "Detail silhouette", "Composition", "Total available"]
 
 SIZE_ORDER = {
     "XXS": 10, "XS": 20, "SM": 30, "S": 30, "MD": 40, "M": 40,
@@ -248,6 +248,8 @@ def apply_filters(
     min_total_available: int = 1,
     seasons: Sequence[str] = (),
     end_uses: Sequence[str] = (),
+    detail_silhouettes: Sequence[str] = (),
+    fits: Sequence[str] = (),
     co_values: Sequence[str] = (),
     exclude_cotton: bool = True,
     min_article_qty: int = 1,
@@ -264,6 +266,10 @@ def apply_filters(
         mask &= data["Season"].isin(seasons)
     if end_uses:
         mask &= data["End use"].isin(end_uses)
+    if detail_silhouettes:
+        mask &= data["Detail silhouette"].isin(detail_silhouettes)
+    if fits:
+        mask &= data["Fit"].isin(fits)
     if co_values:
         mask &= data["C/O"].isin(co_values)
     availability_cols = list(selected_warehouses) if selected_warehouses else ["Local warehouse 101", "Local warehouse 501", "Central warehouse"]
@@ -352,7 +358,8 @@ def write_offer_excel(offer_df: pd.DataFrame, title: str = "UA Offer") -> bytes:
         "EUR RRP": 11, "EAN": 18, "Gender": 12, "Silhouette": 14,
         "Fit": 16, "End use": 16, "Season": 12, "C/O": 10,
         "MOC CZK": 12, "Color group": 14, "Color name": 22,
-        "Composition": 34, "Total available": 15,
+        "Color code": 12, "Detail silhouette": 18, "Composition": 34,
+        "Total available": 15,
     }
     for idx, column_name in enumerate(offer_df.columns, start=1):
         ws.column_dimensions[get_column_letter(idx)].width = widths.get(column_name, 14)
@@ -369,4 +376,3 @@ def unique_sorted(data: pd.DataFrame, col: str) -> list[str]:
         return []
     vals = [v for v in clean_text(data[col]).unique().tolist() if v and v.lower() not in {"0", "nan", "none"}]
     return sorted(vals)
-
