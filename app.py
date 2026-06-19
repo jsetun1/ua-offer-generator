@@ -48,6 +48,8 @@ def main() -> None:
     st.header("2. Offer criteria")
     col1, col2, col3, col4 = st.columns(4)
     gender_options = unique_sorted(data, "Gender")
+    detail_silhouette_options = unique_sorted(data, "Detail silhouette")
+    fit_options = unique_sorted(data, "Fit")
 
     with col1:
         product_types = st.multiselect(
@@ -77,6 +79,8 @@ def main() -> None:
     with col4:
         seasons = st.multiselect("Season", unique_sorted(data, "Season"), default=[])
         end_uses = st.multiselect("End use", unique_sorted(data, "End use"), default=[])
+        detail_silhouettes = st.multiselect("Sleeve / detail silhouette", detail_silhouette_options, default=[])
+        fits = st.multiselect("Fit", fit_options, default=[])
         co_values = st.multiselect("C/O", unique_sorted(data, "C/O"), default=[])
         include_extra_columns = st.checkbox("Include helper columns in export", value=False)
 
@@ -91,6 +95,8 @@ def main() -> None:
         min_total_available=int(min_total_available),
         seasons=seasons,
         end_uses=end_uses,
+        detail_silhouettes=detail_silhouettes,
+        fits=fits,
         co_values=co_values,
         exclude_cotton=exclude_cotton,
         min_article_qty=int(min_article_qty),
@@ -131,6 +137,10 @@ def main() -> None:
             """
             **Technical T-shirts** = `Division = Apparel` + `Silhouette = Tops` + `Detail silhouette contains sleeve/sleeveless/tee`.
 
+            **Sleeve / detail silhouette** filters exact values from `Detail silhouette`, for example Short-Sleeves or Long-Sleeves.
+
+            **Fit** filters exact values from `Fit`, for example Loose, Fitted or Compression.
+
             **Exclude cotton** removes rows where `Composition` contains `cotton`.
 
             **Dark Blue** currently means `Color name` contains `Navy`, `Midnight`, or `Academy`.
@@ -142,4 +152,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
