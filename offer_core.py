@@ -244,6 +244,8 @@ def apply_filters(
     colors: Sequence[str] = ("Black", "Dark Blue"),
     price_min: float = 0,
     price_max: float = 999,
+    price_eur_min: float | None = None,
+    price_eur_max: float | None = None,
     selected_warehouses: Sequence[str] = ("Local warehouse 101", "Local warehouse 501", "Central warehouse"),
     min_total_available: int = 1,
     seasons: Sequence[str] = (),
@@ -262,6 +264,10 @@ def apply_filters(
     if colors:
         mask &= color_mask(data, colors)
     mask &= data["MOC CZK"].between(price_min, price_max, inclusive="both")
+    if price_eur_min is not None or price_eur_max is not None:
+        eur_min = 0 if price_eur_min is None else price_eur_min
+        eur_max = float("inf") if price_eur_max is None or price_eur_max <= 0 else price_eur_max
+        mask &= data["MOC EUR"].between(eur_min, eur_max, inclusive="both")
     if seasons:
         mask &= data["Season"].isin(seasons)
     if end_uses:
