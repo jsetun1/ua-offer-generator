@@ -15,11 +15,11 @@ from openpyxl.utils import get_column_letter
 
 OUTPUT_COLUMNS = [
     "Artikl", "Size", "Název", "Local warehouse 101", "Local warehouse 501",
-    "Central warehouse", "ORDER", "EUR RRP", "EAN", "Gender", "Silhouette",
-    "Fit", "End use", "Season", "C/O",
+    "Central warehouse", "ORDER", "MOC CZK", "MOC EUR", "EAN", "Gender",
+    "Silhouette", "Fit", "End use", "Season", "C/O",
 ]
 
-EXTRA_COLUMNS = ["MOC CZK", "Color group", "Color name", "Color code", "Detail silhouette", "Composition", "Total available"]
+EXTRA_COLUMNS = ["Color group", "Color name", "Color code", "Detail silhouette", "Composition", "Total available"]
 
 SIZE_ORDER = {
     "XXS": 10, "XS": 20, "SM": 30, "S": 30, "MD": 40, "M": 40,
@@ -309,7 +309,8 @@ def to_offer_table(filtered: pd.DataFrame, include_extra_columns: bool = False) 
         "Local warehouse 501": filtered["Local warehouse 501"].map(display_qty),
         "Central warehouse": filtered["Central warehouse"].map(display_qty),
         "ORDER": "",
-        "EUR RRP": filtered["MOC EUR"],
+        "MOC CZK": filtered["MOC CZK"],
+        "MOC EUR": filtered["MOC EUR"],
         "EAN": filtered["EAN"].astype(str),
         "Gender": filtered["Gender"],
         "Silhouette": filtered["Silhouette"],
@@ -354,16 +355,16 @@ def write_offer_excel(offer_df: pd.DataFrame, title: str = "UA Offer") -> bytes:
                 cell.fill = order_fill
             if header == "EAN":
                 cell.number_format = "@"
-            if header in {"EUR RRP", "MOC CZK", "Total available"}:
+            if header in {"MOC CZK", "MOC EUR", "Total available"}:
                 cell.number_format = "#,##0"
     ws.freeze_panes = "A5"
     ws.auto_filter.ref = f"A{start_row}:{get_column_letter(len(offer_df.columns))}{start_row + len(offer_df)}"
     widths = {
         "Artikl": 16, "Size": 10, "Název": 34, "Local warehouse 101": 18,
         "Local warehouse 501": 18, "Central warehouse": 18, "ORDER": 12,
-        "EUR RRP": 11, "EAN": 18, "Gender": 12, "Silhouette": 14,
+        "MOC CZK": 12, "MOC EUR": 11, "EAN": 18, "Gender": 12, "Silhouette": 14,
         "Fit": 16, "End use": 16, "Season": 12, "C/O": 10,
-        "MOC CZK": 12, "Color group": 14, "Color name": 22,
+        "Color group": 14, "Color name": 22,
         "Color code": 12, "Detail silhouette": 18, "Composition": 34,
         "Total available": 15,
     }
