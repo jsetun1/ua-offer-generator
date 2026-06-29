@@ -151,7 +151,8 @@ def main() -> None:
             help=(
                 "V prvním listu vložte styly do buněk pod sebe. Hodnota 1326799 vybere všechny "
                 "barvy stylu; 1326799-036 (případně 1326799/036) vybere pouze konkrétní styl/barvu. "
-                "Při importu se neaplikuje filtr Color group / color logic."
+                "Při importu mají zadané styly přednost před všemi standardními filtry; vybraný sklad "
+                "slouží pouze pro výpočet a zobrazení dostupnosti."
             ),
             key="style_import_file",
         )
@@ -196,9 +197,11 @@ def main() -> None:
                 selected_warehouses=selected_warehouses,
                 max_alternatives=int(alternative_count),
             )
-            st.caption(
-                f"Style import loaded: {len(selected_style_refs)} unique selection(s). "
-                "Base styles include all colours; exact style-colour values include only that colour."
+            st.success(
+                f"Import mode is active: {len(selected_style_refs)} unique selection(s) loaded. "
+                "The import overrides every standard offer filter. Base styles include all colours; "
+                "exact style-colour values include only that colour. Selected warehouses are used only "
+                "to calculate and display availability, not to remove imported products."
             )
 
             if not unavailable_import_df.empty:
@@ -396,9 +399,12 @@ def main() -> None:
             warehouses. UA size labels SM / MD / LG and XXL are converted automatically.
 
             **Style import (XLSX)**: insert styles in cells under one another in the first
-            worksheet. `1326799` returns every available colour of the base style;
-            `1326799-036` (or `1326799/036`) returns only that exact style/colour. When this import is used,
-            the generic colour filter is ignored so that the requested colour logic remains exact.
+            worksheet. `1326799` returns all colours of the base style; `1326799-036`
+            (or `1326799/036`) returns only that exact style/colour. **Import mode has precedence over
+            all regular offer filters**: product type, gender, material, Top styles, colour, MOC ranges,
+            season, end use, silhouette, fit, C/O, minimum availability, minimum style/colour stock,
+            minimum number of sizes and Full sizerun. Warehouse selection remains active only for calculating
+            and displaying availability; it does not remove imported products from the result.
             If imported products are present in the master but have **zero stock in all three uploaded warehouses**,
             an immediate list and download appear below the import. The file contains the unavailable imported products,
             ranked available alternatives, and a separate sheet for valid imported values not found in master data.
