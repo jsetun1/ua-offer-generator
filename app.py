@@ -211,9 +211,9 @@ def main() -> None:
                 )
                 with st.expander("Nedostupné položky z importu a doporučené alternativy", expanded=False):
                     st.caption(
-                        "Alternativy jsou řazené podle shody pohlaví, kategorie, střihu, fitu, použití, "
-                        "materiálu a MOC. Přednost má jiná dostupná barva stejného stylu. "
-                        "Dostupnost alternativ odpovídá aktuálně vybraným skladům."
+                        "Alternativy jsou vždy jiný UA styl, nikoli jen jiná barva stejného stylu. "
+                        "Nejprve se zachovává barva, pohlaví, division, použití a střih; následně se porovnává "
+                        "typ produktu, fit, materiál a MOC. Dostupnost alternativ odpovídá aktuálně vybraným skladům."
                     )
                     st.subheader("Nedostupné z importu")
                     st.dataframe(unavailable_import_df, use_container_width=True, hide_index=True)
@@ -408,8 +408,9 @@ def main() -> None:
             If imported products are present in the master but have **zero stock in all three uploaded warehouses**,
             an immediate list and download appear below the import. The file contains the unavailable imported products,
             ranked available alternatives, and a separate sheet for valid imported values not found in master data.
-            Alternatives use the warehouses selected for the current offer and rank similarity by gender, category,
-            silhouette, fit, end use, material and MOC; another available colour of the same style is preferred.
+            Alternatives use the warehouses selected for the current offer and are always a **different UA base style**.
+            They first seek the same colour, gender, division, end use and cut, then compare product family, fit,
+            material and MOC. A different colourway of the same style is never offered as an alternative.
 
             **Final discount, currency and VAT mode**: choose CZK, EUR or both currencies,
             then whether the final discounted price is **Bez DPH** or **S DPH**. The first
