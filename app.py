@@ -83,11 +83,6 @@ def main() -> None:
         st.markdown("**Material**")
         technical_material = st.checkbox("Technické", value=False)
         cotton_material = st.checkbox("Bavlna", value=False)
-        exclude_cotton = st.checkbox(
-            "Exclude cotton (Technical T-shirts)",
-            value=True,
-            help="When Bavlna is selected, this legacy setting is automatically ignored.",
-        )
         only_top_styles = st.checkbox("Only Top styles", value=False)
 
     with col2:
@@ -175,7 +170,6 @@ def main() -> None:
         detail_silhouettes=detail_silhouettes,
         fits=fits,
         co_values=co_values,
-        exclude_cotton=exclude_cotton,
         technical_material=technical_material,
         cotton_material=cotton_material,
         only_top_styles=only_top_styles,
@@ -237,6 +231,9 @@ def main() -> None:
             **Technické / Bavlna**: a row containing `cotton` or `bavlna` in
             `Composition` is Bavlna. Other compositions containing common performance
             fibres such as polyester, elastane, nylon or polyamide are Technické.
+            Both selected includes both groups; neither selected leaves material unrestricted.
+            The product type **Technical T-shirts** now defines only the product category,
+            not the material.
 
             **Celkem ks styl/barva**: total stock across all EAN rows sharing `Artikl`
             (UA style + colour), calculated from the currently selected warehouses.
