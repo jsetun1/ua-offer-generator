@@ -176,7 +176,14 @@ def main() -> None:
         only_full_sizerun=only_full_sizerun,
     )
 
-    offer_df = to_offer_table(filtered, include_extra_columns=include_extra_columns)
+    # Preview remains neutral: it shows both MOC currencies and does not yet
+    # add a negotiated discount. Final currency and discount are chosen below.
+    preview_df = to_offer_table(
+        filtered,
+        include_extra_columns=include_extra_columns,
+        export_currency="CZK + EUR",
+        discount_percent=None,
+    )
 
     st.header("3. Preview")
     full_sizerun_count = (
@@ -185,8 +192,8 @@ def main() -> None:
         else 0
     )
     kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
-    kpi1.metric("EAN rows", f"{len(offer_df):,}")
-    kpi2.metric("Style / colour", f"{offer_df['Artikl'].nunique() if not offer_df.empty else 0:,}")
+    kpi1.metric("EAN rows", f"{len(preview_df):,}")
+    kpi2.metric("Style / colour", f"{preview_df['Artikl'].nunique() if not preview_df.empty else 0:,}")
     kpi3.metric(
         "Selected availability",
         f"{int(filtered['Dostupnost ve vybraných skladech'].sum()) if not filtered.empty else 0:,}",
@@ -201,19 +208,59 @@ def main() -> None:
         f"{filtered['MOC EUR'].mean():,.0f}" if not filtered.empty else "-",
     )
 
-    st.dataframe(offer_df.head(500), use_container_width=True, hide_index=True)
-    if len(offer_df) > 500:
+    st.dataframe(preview_df.head(500), use_container_width=True, hide_index=True)
+    if len(preview_df) > 500:
         st.caption("Preview shows first 500 rows only. Export contains all filtered rows.")
 
-    st.header("4. Export")
+    st.header("4. Final pricing and export")
+    export_col1, export_col2 = st.columns([1, 1])
+    with export_col1:
+        discount_percent = st.number_input(
+            "Sleva z MOC včetně DPH (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=0.0,
+            step=0.5,
+            format="%.1f",
+            help=(
+                "Sleva se propíše až do finální nabídky a nemění seznam vyfiltrovaných produktů."
+            ),
+        )
+    with export_col2:
+        export_currency = st.radio(
+            "Měna ve finálním exportu",
+            options=["CZK", "EUR", "CZK + EUR"],
+            index=2,
+            horizontal=True,
+            help="Vyberte, zda má export obsahovat ceny v CZK, EUR, nebo obou měnách.",
+        )
+
+    st.caption(
+        "Nabídková cena bez DPH = MOC × (1 − sleva) / 1,21. "
+        "DPH je pevně 21 %. Příklad: 999 CZK při slevě 40 % = 495,37 CZK bez DPH."
+    )
+
+    final_offer_df = to_offer_table(
+        filtered,
+        include_extra_columns=include_extra_columns,
+        export_currency=export_currency,
+        discount_percent=float(discount_percent),
+        vat_rate=0.21,
+    )
+
     file_name = st.text_input("Output filename", value="ua_offer.xlsx")
     if not file_name.lower().endswith(".xlsx"):
         file_name += ".xlsx"
 
-    if offer_df.empty:
+    if final_offer_df.empty:
         st.warning("No products match the current filters.")
     else:
-        excel_bytes = write_offer_excel(offer_df)
+        excel_bytes = write_offer_excel(
+            final_offer_df,
+            discount_percent=float(discount_percent),
+            export_currency=export_currency,
+            vat_rate=0.21,
+        )
         st.download_button(
             label="Download Excel offer",
             data=excel_bytes,
@@ -242,6 +289,11 @@ def main() -> None:
             **Full sizerun**: Mens requires S, M, L, XL and 2XL; Womens requires
             XS, S, M, L and XL. Each of those sizes must have stock in the selected
             warehouses. UA size labels SM / MD / LG and XXL are converted automatically.
+
+            **Final discount and currency**: choose CZK, EUR or both currencies before
+            downloading. The offer adds MOC, one discount percentage and the resulting
+            offer price without VAT. The calculation is `MOC × (1 − discount) / 1.21`.
+            VAT is fixed at 21 %.
 
             **Central warehouse** = sum of the first two `Week` columns in the central
             warehouse file.
