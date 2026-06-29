@@ -115,6 +115,109 @@ def read_excel(path_or_buffer) -> pd.DataFrame:
     return pd.DataFrame(list(rows), columns=headers)
 
 
+STYLE_SELECTOR_RE = re.compile(r"^(\d{5,10})(?:-([A-Z0-9]{2,6}))?$")
+
+
+def normalize_style_selector(value) -> str:
+    """Normalize an imported UA style reference.
+
+    Accepted values are either a base style (for example ``1326799``) or an
+    exact style/colour reference (for example ``1326799-036``). Values that
+    do not follow this format are ignored; this also makes a header such as
+    ``Artikl`` harmless.
+    """
+    if value is None or pd.isna(value):
+        return ""
+
+    text = str(value).strip().upper()
+    if re.fullmatch(r"\d+\.0", text):
+        text = text[:-2]
+    text = (
+        text.replace("–", "-")
+        .replace("—", "-")
+        .replace("−", "-")
+        .replace("/", "-")
+    )
+    text = re.sub(r"\s+", "", text)
+    match = STYLE_SELECTOR_RE.fullmatch(text)
+    if not match:
+        return ""
+
+    style_code, colour_code = match.groups()
+    return f"{style_code}-{colour_code}" if colour_code else style_code
+
+
+def normalize_style_selectors(values: Sequence[object]) -> list[str]:
+    """Return unique valid imported style references in source order."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        selector = normalize_style_selector(value)
+        if selector and selector not in seen:
+            result.append(selector)
+            seen.add(selector)
+    return result
+
+
+def read_style_selectors_excel(path_or_buffer) -> list[str]:
+    """Read style references from every populated cell of the first XLSX sheet.
+
+    The import therefore works for the requested one-column layout with values
+    below each other, whether the file contains a column heading or not.
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path_or_buffer, read_only=True, data_only=True)
+    ws = wb[wb.sheetnames[0]]
+    values = (value for row in ws.iter_rows(values_only=True) for value in row)
+    return normalize_style_selectors(values)
+
+
+def style_selection_mask(data: pd.DataFrame, style_selectors: Sequence[object]) -> pd.Series:
+    """Match exact style/colour references or all colours of a base style.
+
+    An imported base style has precedence over the generic colour filter: it
+    intentionally includes every available colour belonging to that base style.
+    """
+    selectors = normalize_style_selectors(style_selectors)
+    if not selectors:
+        return pd.Series(True, index=data.index)
+
+    exact_articles = {value for value in selectors if "-" in value}
+    base_styles = {value for value in selectors if "-" not in value}
+
+    articles = (
+        clean_text(data["Artikl"])
+        .str.upper()
+        .str.replace("–", "-", regex=False)
+        .str.replace("—", "-", regex=False)
+        .str.replace(" ", "", regex=False)
+    )
+    style_codes = clean_text(data["Style code"]).str.upper()
+    return articles.isin(exact_articles) | style_codes.isin(base_styles)
+
+
+def unmatched_style_selectors(data: pd.DataFrame, style_selectors: Sequence[object]) -> list[str]:
+    """Return valid imported references that are absent from master data."""
+    selectors = normalize_style_selectors(style_selectors)
+    if not selectors:
+        return []
+
+    article_values = set(
+        clean_text(data["Artikl"])
+        .str.upper()
+        .str.replace("–", "-", regex=False)
+        .str.replace("—", "-", regex=False)
+        .str.replace(" ", "", regex=False)
+        .tolist()
+    )
+    style_values = set(clean_text(data["Style code"]).str.upper().tolist())
+    return [
+        value for value in selectors
+        if (value not in article_values if "-" in value else value not in style_values)
+    ]
+
+
 def find_col(df: pd.DataFrame, candidates: Sequence[str], required: bool = True) -> str | None:
     normalized = {str(c).strip().casefold(): c for c in df.columns}
     for candidate in candidates:
@@ -452,6 +555,7 @@ def apply_filters(
     cotton_material: bool = False,
     only_top_styles: bool = False,
     only_full_sizerun: bool = False,
+    selected_style_refs: Sequence[object] = (),
 ) -> pd.DataFrame:
     data = add_stock_metrics(data, selected_warehouses)
     mask = pd.Series(True, index=data.index)
@@ -462,7 +566,12 @@ def apply_filters(
 
     if genders:
         mask &= data["Gender"].isin(genders)
-    if colors:
+    # A style import is an explicit product selection. When active, it
+    # replaces the generic colour-group filter so that a base style returns
+    # every available colour, while style-colour input returns that exact colour.
+    if selected_style_refs:
+        mask &= style_selection_mask(data, selected_style_refs)
+    elif colors:
         mask &= color_mask(data, colors)
 
     mask &= data["MOC CZK"].between(price_min, price_max, inclusive="both")
@@ -526,18 +635,30 @@ def _currency_flags(export_currency: str) -> tuple[bool, bool]:
     return (include_czk, include_eur) if include_czk or include_eur else (True, True)
 
 
+def price_includes_vat(price_vat_mode: str) -> bool:
+    """Return whether the requested final offer price is VAT-inclusive."""
+    value = str(price_vat_mode or "Bez DPH").strip().casefold()
+    return value in {"s dph", "včetně dph", "vcetne dph", "including vat", "with vat"}
+
+
+def offer_price_column_name(currency: str, price_vat_mode: str) -> str:
+    suffix = "s DPH" if price_includes_vat(price_vat_mode) else "bez DPH"
+    return f"Nabídková cena {currency} {suffix}"
+
+
 def to_offer_table(
     filtered: pd.DataFrame,
     include_extra_columns: bool = False,
     export_currency: str = "CZK + EUR",
     discount_percent: float | None = None,
     vat_rate: float = 0.21,
+    price_vat_mode: str = "Bez DPH",
 ) -> pd.DataFrame:
     """Build the offer table and, optionally, final negotiated price columns.
 
-    MOC is understood as VAT-inclusive. A negotiated price is therefore
-    calculated as MOC × (1 - discount) / (1 + VAT), i.e. the result is without VAT.
-    A ``None`` discount keeps preview output neutral and shows only the MOC columns.
+    MOC is VAT-inclusive. Final export can show either a discounted price
+    without VAT or the discounted VAT-inclusive price. A ``None`` discount
+    keeps preview output neutral and shows only the MOC columns.
     """
     include_czk, include_eur = _currency_flags(export_currency)
     base = {
@@ -557,14 +678,19 @@ def to_offer_table(
     if discount_percent is not None:
         discount_value = max(0.0, min(float(discount_percent), 100.0))
         vat_value = max(0.0, float(vat_rate))
-        price_factor = (1 - discount_value / 100) / (1 + vat_value)
+        discounted_factor = 1 - discount_value / 100
+        price_factor = discounted_factor if price_includes_vat(price_vat_mode) else discounted_factor / (1 + vat_value)
         base["Sleva %"] = discount_value
         if include_czk:
             base["MOC CZK"] = filtered["MOC CZK"]
-            base["Nabídková cena CZK bez DPH"] = (filtered["MOC CZK"] * price_factor).round(2)
+            base[offer_price_column_name("CZK", price_vat_mode)] = (
+                filtered["MOC CZK"] * price_factor
+            ).round(2)
         if include_eur:
             base["MOC EUR"] = filtered["MOC EUR"]
-            base["Nabídková cena EUR bez DPH"] = (filtered["MOC EUR"] * price_factor).round(2)
+            base[offer_price_column_name("EUR", price_vat_mode)] = (
+                filtered["MOC EUR"] * price_factor
+            ).round(2)
     else:
         if include_czk:
             base["MOC CZK"] = filtered["MOC CZK"]
@@ -597,6 +723,7 @@ def write_offer_excel(
     discount_percent: float | None = None,
     export_currency: str = "CZK + EUR",
     vat_rate: float = 0.21,
+    price_vat_mode: str = "Bez DPH",
 ) -> bytes:
     wb = Workbook()
     ws = wb.active
@@ -619,7 +746,7 @@ def write_offer_excel(
             value=(
                 f"Currency: {export_currency} | Discount from VAT-inclusive MOC: "
                 f"{float(discount_percent):g} % | VAT: {float(vat_rate) * 100:g} % | "
-                "Offer prices are without VAT."
+                f"Offer prices: {'including VAT' if price_includes_vat(price_vat_mode) else 'without VAT'}."
             ),
         )
 
@@ -637,16 +764,12 @@ def write_offer_excel(
         "Total available",
         "Dostupné velikosti styl/barva",
     }
-    money_columns = {
-        "MOC CZK",
-        "MOC EUR",
-        "Nabídková cena CZK bez DPH",
-        "Nabídková cena EUR bez DPH",
-    }
+    money_columns = {"MOC CZK", "MOC EUR"}
     discounted_price_columns = {
-        "Nabídková cena CZK bez DPH",
-        "Nabídková cena EUR bez DPH",
+        column for column in offer_df.columns
+        if str(column).startswith("Nabídková cena ")
     }
+    money_columns |= discounted_price_columns
     for row_idx, row in enumerate(offer_df.itertuples(index=False), start=start_row + 1):
         for col_idx, value in enumerate(row, start=1):
             header = offer_df.columns[col_idx - 1]
@@ -690,6 +813,8 @@ def write_offer_excel(
         "MOC EUR": 13,
         "Nabídková cena CZK bez DPH": 26,
         "Nabídková cena EUR bez DPH": 26,
+        "Nabídková cena CZK s DPH": 24,
+        "Nabídková cena EUR s DPH": 24,
         "EAN": 18,
         "Gender": 12,
         "Silhouette": 14,
