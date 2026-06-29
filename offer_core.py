@@ -507,7 +507,9 @@ SUBSTITUTION_ALTERNATIVE_COLUMNS = [
     "Nedostupný název",
     "MOC nedostupného CZK",
     "MOC nedostupného EUR",
+    "Barva nedostupného",
     "Pořadí alternativy",
+    "Úroveň shody",
     "Skóre shody",
     "Důvod doporučení",
     "Alternativa – artikl",
@@ -619,75 +621,230 @@ def _price_match_score(target_price: float, candidate_price: float) -> tuple[int
     return 0, None
 
 
+PRODUCT_FAMILY_PATTERNS = (
+    ("polo", re.compile(r"\bpolo\b", re.IGNORECASE)),
+    ("tričko", re.compile(r"\btee\b|t[ -]?shirt", re.IGNORECASE)),
+    ("kraťasy", re.compile(r"\bshorts?\b", re.IGNORECASE)),
+    ("legíny", re.compile(r"\bleggings?\b", re.IGNORECASE)),
+    ("kalhoty", re.compile(r"\bpants?\b|\btrousers?\b", re.IGNORECASE)),
+    ("bunda", re.compile(r"\bjacket\b", re.IGNORECASE)),
+    ("mikina", re.compile(r"\bhoodie\b|\bhooded\b", re.IGNORECASE)),
+    ("vesta", re.compile(r"\bvest\b", re.IGNORECASE)),
+    ("podprsenka", re.compile(r"\bbra\b", re.IGNORECASE)),
+    ("sukně", re.compile(r"\bskirt\b", re.IGNORECASE)),
+    ("kšilt", re.compile(r"\bvisor\b", re.IGNORECASE)),
+    ("čepice", re.compile(r"\bcap\b|\bhat\b", re.IGNORECASE)),
+    ("ponožky", re.compile(r"\bsocks?\b", re.IGNORECASE)),
+    ("boty", re.compile(r"\bshoe\b|\bshoes\b|\bsneaker\b|\bcleat\b", re.IGNORECASE)),
+)
+
+
+def _product_family_tokens(value: object) -> set[str]:
+    """Extract a small, practical product-family signal from a UA item name.
+
+    Master data does not always expose a dedicated product-family field. This
+    signal helps distinguish, for example, a golf polo from another short
+    sleeve golf top. It is used as a strong ranking factor, never as the only
+    matching criterion.
+    """
+    name = _comparison_text(value)
+    if not name:
+        return set()
+    return {label for label, pattern in PRODUCT_FAMILY_PATTERNS if pattern.search(name)}
+
+
+def _candidate_pool(
+    candidates: pd.DataFrame,
+    mask: pd.Series,
+    label: str,
+) -> tuple[pd.DataFrame, str] | None:
+    """Return the first non-empty candidate pool with a human-readable label."""
+    pool = candidates.loc[mask].copy()
+    return (pool, label) if not pool.empty else None
+
+
 def _recommendations_for_target(
     target: pd.Series,
     catalog: pd.DataFrame,
     max_alternatives: int,
 ) -> pd.DataFrame:
-    """Return ranked in-stock substitutes for one unavailable style / colour."""
-    if catalog.empty:
-        return pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+    """Return ranked in-stock substitutes for one unavailable style / colour.
 
-    candidates = catalog.loc[
-        (catalog["Dostupnost ve vybraných skladech"] > 0)
-        & (catalog["_article_key"] != target.get("_article_key", ""))
-    ].copy()
-    if candidates.empty:
+    A substitute must be a *different UA base style*. A different colour of
+    the same style is therefore deliberately not presented as an alternative.
+    The ranking first tries to preserve the requested colour, gender, product
+    division, use case and cut; price then breaks otherwise similar choices.
+    """
+    if catalog.empty:
         return pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
 
     target_style = _comparison_text(target.get("Style code", ""))
     target_gender = _comparison_text(target.get("Gender", ""))
-    same_style = candidates["Style code"].map(_comparison_text).eq(target_style) if target_style else pd.Series(False, index=candidates.index)
-    same_gender = candidates["Gender"].map(_comparison_text).eq(target_gender) if target_gender else pd.Series(True, index=candidates.index)
-    same_division = candidates["Division"].map(_comparison_text).eq(_comparison_text(target.get("Division", ""))) if _comparison_text(target.get("Division", "")) else pd.Series(False, index=candidates.index)
-    same_segment = candidates["Segment"].map(_comparison_text).eq(_comparison_text(target.get("Segment", ""))) if _comparison_text(target.get("Segment", "")) else pd.Series(False, index=candidates.index)
-    same_silhouette = candidates["Silhouette"].map(_comparison_text).eq(_comparison_text(target.get("Silhouette", ""))) if _comparison_text(target.get("Silhouette", "")) else pd.Series(False, index=candidates.index)
-    same_detail = candidates["Detail silhouette"].map(_comparison_text).eq(_comparison_text(target.get("Detail silhouette", ""))) if _comparison_text(target.get("Detail silhouette", "")) else pd.Series(False, index=candidates.index)
+    target_division = _comparison_text(target.get("Division", ""))
+    target_end_use = _comparison_text(target.get("End use", ""))
+    target_silhouette = _comparison_text(target.get("Silhouette", ""))
+    target_detail = _comparison_text(target.get("Detail silhouette", ""))
+    target_color_group = _comparison_text(target.get("Color group", ""))
+    target_color_name = _comparison_text(target.get("Color name", ""))
 
-    # First keep true category matches. If that produces nothing, widen only
-    # enough to still preserve the requested gender / product division.
-    strict = same_style | (same_gender & same_division & (same_segment | same_silhouette | same_detail))
-    relaxed = same_style | (same_gender & same_division)
-    fallback = same_style | same_gender
-    if strict.any():
-        candidates = candidates.loc[strict].copy()
-    elif relaxed.any():
-        candidates = candidates.loc[relaxed].copy()
-    elif fallback.any():
-        candidates = candidates.loc[fallback].copy()
+    candidates = catalog.loc[catalog["Dostupnost ve vybraných skladech"] > 0].copy()
+    if candidates.empty:
+        return pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
 
+    # An alternative must be a different product, not an available colourway
+    # of the exact same base style.
+    if target_style:
+        candidates = candidates.loc[
+            ~candidates["Style code"].map(_comparison_text).eq(target_style)
+        ].copy()
+    else:
+        candidates = candidates.loc[
+            candidates["_article_key"].ne(target.get("_article_key", ""))
+        ].copy()
+    if candidates.empty:
+        return pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+
+    same_gender = (
+        candidates["Gender"].map(_comparison_text).eq(target_gender)
+        if target_gender else pd.Series(True, index=candidates.index)
+    )
+    same_division = (
+        candidates["Division"].map(_comparison_text).eq(target_division)
+        if target_division else pd.Series(True, index=candidates.index)
+    )
+    same_end_use = (
+        candidates["End use"].map(_comparison_text).eq(target_end_use)
+        if target_end_use else pd.Series(False, index=candidates.index)
+    )
+    same_silhouette = (
+        candidates["Silhouette"].map(_comparison_text).eq(target_silhouette)
+        if target_silhouette else pd.Series(False, index=candidates.index)
+    )
+    same_detail = (
+        candidates["Detail silhouette"].map(_comparison_text).eq(target_detail)
+        if target_detail else pd.Series(False, index=candidates.index)
+    )
+    same_color_group = (
+        candidates["Color group"].map(_comparison_text).eq(target_color_group)
+        if target_color_group else pd.Series(False, index=candidates.index)
+    )
+    same_color_name = (
+        candidates["Color name"].map(_comparison_text).eq(target_color_name)
+        if target_color_name else pd.Series(False, index=candidates.index)
+    )
+
+    # Keep the useful gender + division boundary whenever the master contains
+    # those attributes. This prevents e.g. a men's golf polo being replaced by
+    # unrelated footwear or a women's top.
+    compatible = same_gender & same_division
+    if not compatible.any():
+        compatible = same_gender if same_gender.any() else pd.Series(True, index=candidates.index)
+    candidates = candidates.loc[compatible].copy()
+    if candidates.empty:
+        return pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+
+    # Re-align all matching masks after the compatibility filter.
+    same_end_use = same_end_use.reindex(candidates.index, fill_value=False)
+    same_silhouette = same_silhouette.reindex(candidates.index, fill_value=False)
+    same_detail = same_detail.reindex(candidates.index, fill_value=False)
+    same_color_group = same_color_group.reindex(candidates.index, fill_value=False)
+    same_color_name = same_color_name.reindex(candidates.index, fill_value=False)
+    category_match = same_detail | same_silhouette
+
+    # The first non-empty pool defines the quality floor. This makes the
+    # default behaviour match a human buyer's expectation: same colour first,
+    # then same golf/training use and cut, then price. Only if there is no
+    # meaningful same-colour option does the app widen the search.
+    pools = [
+        _candidate_pool(
+            candidates,
+            same_color_group & same_end_use & category_match,
+            "stejná barva + použití + střih",
+        ),
+        _candidate_pool(
+            candidates,
+            same_color_group & same_end_use,
+            "stejná barva + použití",
+        ),
+        _candidate_pool(
+            candidates,
+            same_color_group & category_match,
+            "stejná barva + střih",
+        ),
+        _candidate_pool(
+            candidates,
+            same_color_group,
+            "stejná barva",
+        ),
+        _candidate_pool(
+            candidates,
+            same_end_use & category_match,
+            "stejné použití + střih (jiná barva)",
+        ),
+        _candidate_pool(
+            candidates,
+            same_end_use,
+            "stejné použití (jiná barva)",
+        ),
+        _candidate_pool(
+            candidates,
+            category_match,
+            "stejný střih (jiná barva)",
+        ),
+        _candidate_pool(
+            candidates,
+            pd.Series(True, index=candidates.index),
+            "stejné pohlaví a division (širší alternativa)",
+        ),
+    ]
+    selected_pool = next((pool for pool in pools if pool is not None), None)
+    if selected_pool is None:
+        return pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+    candidates, pool_label = selected_pool
+
+    target_family = _product_family_tokens(target.get("Název", ""))
     ranked: list[dict[str, object]] = []
     for _, candidate in candidates.iterrows():
         score = 0
         reasons: list[str] = []
-        if target_style and _comparison_text(candidate.get("Style code", "")) == target_style:
-            score += 100
-            reasons.append("jiná barva stejného stylu")
+        candidate_family = _product_family_tokens(candidate.get("Název", ""))
+        matching_family = sorted(target_family & candidate_family)
+
         if _same_attribute(target, candidate, "Gender"):
-            score += 25
+            score += 35
             reasons.append("stejné pohlaví")
         if _same_attribute(target, candidate, "Division"):
-            score += 8
+            score += 25
         if _same_attribute(target, candidate, "Segment"):
-            score += 16
+            score += 12
             reasons.append("stejná kategorie")
         if _same_attribute(target, candidate, "Silhouette"):
-            score += 18
+            score += 24
             reasons.append("stejný střih")
         if _same_attribute(target, candidate, "Detail silhouette"):
-            score += 14
+            score += 30
             reasons.append("stejný detail střihu")
         if _same_attribute(target, candidate, "Fit"):
-            score += 8
+            score += 12
             reasons.append("stejný fit")
         if _same_attribute(target, candidate, "End use"):
-            score += 7
+            score += 28
             reasons.append("stejné použití")
         if _same_attribute(target, candidate, "Materiál"):
-            score += 5
+            score += 7
             reasons.append("stejný materiál")
+        if _same_attribute(target, candidate, "Color group"):
+            score += 35
+            reasons.append("stejná barevná skupina")
+        if _same_attribute(target, candidate, "Color name"):
+            score += 12
+            reasons.append("stejný název barvy")
+        if matching_family:
+            score += 45
+            reasons.append(f"shodný typ produktu: {', '.join(matching_family)}")
         if _same_attribute(target, candidate, "Season"):
             score += 3
+
         price_score, price_reason = _price_match_score(
             float(target.get("MOC CZK", 0) or 0),
             float(candidate.get("MOC CZK", 0) or 0),
@@ -696,7 +853,8 @@ def _recommendations_for_target(
         if price_reason:
             reasons.append(price_reason)
         if bool(candidate.get("Top style", False)):
-            score += 1
+            score += 3
+            reasons.append("Top style")
 
         ranked.append(
             {
@@ -718,7 +876,7 @@ def _recommendations_for_target(
     rows: list[dict[str, object]] = []
     for order, item in enumerate(ranked[:max(1, int(max_alternatives))], start=1):
         candidate = item["_candidate"]
-        reasons = item["_reasons"] or ["nejbližší dostupná varianta podle dostupných atributů"]
+        reasons = item["_reasons"] or ["nejbližší dostupná alternativa podle dostupných atributů"]
         rows.append(
             {
                 "Importovaný požadavek": target.get("Importovaný požadavek", ""),
@@ -726,7 +884,9 @@ def _recommendations_for_target(
                 "Nedostupný název": target.get("Název", ""),
                 "MOC nedostupného CZK": target.get("MOC CZK", 0),
                 "MOC nedostupného EUR": target.get("MOC EUR", 0),
+                "Barva nedostupného": target.get("Color group", ""),
                 "Pořadí alternativy": order,
+                "Úroveň shody": pool_label,
                 "Skóre shody": item["_score"],
                 "Důvod doporučení": "; ".join(reasons),
                 "Alternativa – artikl": candidate.get("Artikl", ""),
@@ -752,7 +912,6 @@ def _recommendations_for_target(
         )
 
     return pd.DataFrame(rows, columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
-
 
 def imported_unavailable_with_alternatives(
     data: pd.DataFrame,
@@ -885,6 +1044,8 @@ def write_import_substitution_excel(
             "MOC EUR": 14,
             "MOC nedostupného CZK": 22,
             "MOC nedostupného EUR": 22,
+            "Barva nedostupného": 18,
+            "Úroveň shody": 32,
             "Dostupnost ve vybraných skladech": 26,
             "Celkem ks všechny sklady": 24,
             "Dostupné velikosti ve vybraných skladech": 30,
@@ -911,7 +1072,7 @@ def write_import_substitution_excel(
     write_sheet(
         "Alternativy",
         "Recommended available alternatives",
-        "Alternatives are ranked by the selected-warehouse availability and similarity of gender, category, silhouette, fit, end use, material and MOC. First preference is another available colour of the same base style.",
+        "Every alternative is a different UA base style. Ranking first preserves colour, gender, division, end use and cut; then it uses product family, fit, material, price and selected-warehouse availability.",
         alternatives,
     )
 
