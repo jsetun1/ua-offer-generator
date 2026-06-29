@@ -517,22 +517,62 @@ def display_qty(value: int | float) -> int | str:
     return "100+" if number > 100 else number
 
 
-def to_offer_table(filtered: pd.DataFrame, include_extra_columns: bool = False) -> pd.DataFrame:
-    offer = pd.DataFrame(
+def _currency_flags(export_currency: str) -> tuple[bool, bool]:
+    """Return whether CZK and EUR price columns should be included."""
+    value = str(export_currency or "CZK + EUR").strip().upper()
+    include_czk = value in {"CZK", "CZK + EUR", "BOTH", "ALL"}
+    include_eur = value in {"EUR", "CZK + EUR", "BOTH", "ALL"}
+    # Defensive fallback: keep both prices rather than silently exporting none.
+    return (include_czk, include_eur) if include_czk or include_eur else (True, True)
+
+
+def to_offer_table(
+    filtered: pd.DataFrame,
+    include_extra_columns: bool = False,
+    export_currency: str = "CZK + EUR",
+    discount_percent: float | None = None,
+    vat_rate: float = 0.21,
+) -> pd.DataFrame:
+    """Build the offer table and, optionally, final negotiated price columns.
+
+    MOC is understood as VAT-inclusive. A negotiated price is therefore
+    calculated as MOC × (1 - discount) / (1 + VAT), i.e. the result is without VAT.
+    A ``None`` discount keeps preview output neutral and shows only the MOC columns.
+    """
+    include_czk, include_eur = _currency_flags(export_currency)
+    base = {
+        "Artikl": filtered["Artikl"],
+        "Size": filtered["Size"],
+        "Název": filtered["Název"],
+        "Local warehouse 101": filtered["Local warehouse 101"].map(display_qty),
+        "Local warehouse 501": filtered["Local warehouse 501"].map(display_qty),
+        "Central warehouse": filtered["Central warehouse"].map(display_qty),
+        "Celkem ks styl/barva": filtered["Celkem ks styl/barva"],
+        "Plný sizerun": filtered["Plný sizerun"],
+        "Top style": filtered["Top style"].map(lambda value: "Ano" if bool(value) else ""),
+        "Materiál": filtered["Materiál"],
+        "ORDER": "",
+    }
+
+    if discount_percent is not None:
+        discount_value = max(0.0, min(float(discount_percent), 100.0))
+        vat_value = max(0.0, float(vat_rate))
+        price_factor = (1 - discount_value / 100) / (1 + vat_value)
+        base["Sleva %"] = discount_value
+        if include_czk:
+            base["MOC CZK"] = filtered["MOC CZK"]
+            base["Nabídková cena CZK bez DPH"] = (filtered["MOC CZK"] * price_factor).round(2)
+        if include_eur:
+            base["MOC EUR"] = filtered["MOC EUR"]
+            base["Nabídková cena EUR bez DPH"] = (filtered["MOC EUR"] * price_factor).round(2)
+    else:
+        if include_czk:
+            base["MOC CZK"] = filtered["MOC CZK"]
+        if include_eur:
+            base["MOC EUR"] = filtered["MOC EUR"]
+
+    base.update(
         {
-            "Artikl": filtered["Artikl"],
-            "Size": filtered["Size"],
-            "Název": filtered["Název"],
-            "Local warehouse 101": filtered["Local warehouse 101"].map(display_qty),
-            "Local warehouse 501": filtered["Local warehouse 501"].map(display_qty),
-            "Central warehouse": filtered["Central warehouse"].map(display_qty),
-            "Celkem ks styl/barva": filtered["Celkem ks styl/barva"],
-            "Plný sizerun": filtered["Plný sizerun"],
-            "Top style": filtered["Top style"].map(lambda value: "Ano" if bool(value) else ""),
-            "Materiál": filtered["Materiál"],
-            "ORDER": "",
-            "MOC CZK": filtered["MOC CZK"],
-            "MOC EUR": filtered["MOC EUR"],
             "EAN": filtered["EAN"].astype(str),
             "Gender": filtered["Gender"],
             "Silhouette": filtered["Silhouette"],
@@ -542,6 +582,7 @@ def to_offer_table(filtered: pd.DataFrame, include_extra_columns: bool = False) 
             "C/O": filtered["C/O"],
         }
     )
+    offer = pd.DataFrame(base)
 
     if include_extra_columns:
         for col in EXTRA_COLUMNS:
@@ -550,7 +591,13 @@ def to_offer_table(filtered: pd.DataFrame, include_extra_columns: bool = False) 
     return offer
 
 
-def write_offer_excel(offer_df: pd.DataFrame, title: str = "Under Armour Product Offer") -> bytes:
+def write_offer_excel(
+    offer_df: pd.DataFrame,
+    title: str = "Under Armour Product Offer",
+    discount_percent: float | None = None,
+    export_currency: str = "CZK + EUR",
+    vat_rate: float = 0.21,
+) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "Offer"
@@ -558,12 +605,23 @@ def write_offer_excel(offer_df: pd.DataFrame, title: str = "Under Armour Product
     header_fill = PatternFill("solid", fgColor="1F2937")
     header_font = Font(color="FFFFFF", bold=True)
     order_fill = PatternFill("solid", fgColor="FFF2CC")
+    offer_price_fill = PatternFill("solid", fgColor="E2F0D9")
     title_font = Font(size=14, bold=True, color="111827")
     thin_side = Side(style="thin", color="D1D5DB")
     border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
     ws.cell(row=1, column=1, value=title).font = title_font
     ws.cell(row=2, column=1, value=f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    if discount_percent is not None:
+        ws.cell(
+            row=3,
+            column=1,
+            value=(
+                f"Currency: {export_currency} | Discount from VAT-inclusive MOC: "
+                f"{float(discount_percent):g} % | VAT: {float(vat_rate) * 100:g} % | "
+                "Offer prices are without VAT."
+            ),
+        )
 
     start_row = 4
     for col_idx, column_name in enumerate(offer_df.columns, start=1):
@@ -573,13 +631,21 @@ def write_offer_excel(offer_df: pd.DataFrame, title: str = "Under Armour Product
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = border
 
-    number_columns = {
-        "MOC CZK",
-        "MOC EUR",
+    integer_columns = {
         "Celkem ks styl/barva",
         "Dostupnost ve vybraných skladech",
         "Total available",
         "Dostupné velikosti styl/barva",
+    }
+    money_columns = {
+        "MOC CZK",
+        "MOC EUR",
+        "Nabídková cena CZK bez DPH",
+        "Nabídková cena EUR bez DPH",
+    }
+    discounted_price_columns = {
+        "Nabídková cena CZK bez DPH",
+        "Nabídková cena EUR bez DPH",
     }
     for row_idx, row in enumerate(offer_df.itertuples(index=False), start=start_row + 1):
         for col_idx, value in enumerate(row, start=1):
@@ -589,9 +655,15 @@ def write_offer_excel(offer_df: pd.DataFrame, title: str = "Under Armour Product
             cell.alignment = Alignment(vertical="center")
             if header == "ORDER":
                 cell.fill = order_fill
+            elif header in discounted_price_columns:
+                cell.fill = offer_price_fill
             if header == "EAN":
                 cell.number_format = "@"
-            if header in number_columns:
+            elif header in money_columns:
+                cell.number_format = "#,##0.00"
+            elif header == "Sleva %":
+                cell.number_format = "0.0"
+            elif header in integer_columns:
                 cell.number_format = "#,##0"
 
     ws.freeze_panes = "A5"
@@ -613,8 +685,11 @@ def write_offer_excel(offer_df: pd.DataFrame, title: str = "Under Armour Product
         "Top style": 12,
         "Materiál": 16,
         "ORDER": 12,
-        "MOC CZK": 12,
-        "MOC EUR": 12,
+        "Sleva %": 12,
+        "MOC CZK": 13,
+        "MOC EUR": 13,
+        "Nabídková cena CZK bez DPH": 26,
+        "Nabídková cena EUR bez DPH": 26,
         "EAN": 18,
         "Gender": 12,
         "Silhouette": 14,
@@ -640,7 +715,6 @@ def write_offer_excel(offer_df: pd.DataFrame, title: str = "Under Armour Product
     wb.save(buffer)
     buffer.seek(0)
     return buffer.getvalue()
-
 
 def unique_sorted(data: pd.DataFrame, col: str) -> list[str]:
     if col not in data.columns:
