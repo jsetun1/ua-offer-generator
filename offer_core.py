@@ -49,6 +49,49 @@ EXTRA_COLUMNS = [
     "Composition",
 ]
 
+
+# Internal master-data field names remain stable for compatibility with the
+# current source files. Every user-facing table and export is translated by
+# this mapping at its presentation boundary.
+DISPLAY_COLUMN_LABELS = {
+    "Artikl": "Style / colour",
+    "Název": "Product name",
+    "Materiál": "Material",
+    "Celkem ks styl/barva": "Total units / style-colour",
+    "Plný sizerun": "Full size run",
+    "MOC CZK": "RRP CZK",
+    "MOC EUR": "RRP EUR",
+    "Sleva %": "Discount %",
+    "Dostupnost ve vybraných skladech": "Selected warehouse availability",
+    "Total available": "Total availability (all warehouses)",
+    "Dostupné velikosti styl/barva": "Available sizes / style-colour",
+    "Style code": "Style code",
+    "Importovaný požadavek": "Imported request",
+    "Nedostupný artikl": "Unavailable style / colour",
+    "Nedostupný název": "Unavailable product",
+    "Alternativa – artikl": "Alternative style / colour",
+    "Alternativa – název": "Alternative product",
+    "Pořadí alternativy": "Alternative rank",
+    "Typ alternativy": "Alternative type",
+    "Úroveň shody": "Match level",
+    "Skóre shody": "Match score",
+    "Důvod doporučení": "Recommendation reason",
+    "MOC nedostupného CZK": "Original RRP CZK",
+    "MOC nedostupného EUR": "Original RRP EUR",
+    "Barva nedostupného": "Original color group",
+    "Celkem ks všechny sklady": "Total units (all warehouses)",
+    "Dostupné velikosti ve vybraných skladech": "Available sizes in selected warehouses",
+    "Velikosti v masteru": "Sizes in master",
+    "Počet EAN": "EAN count",
+    "Stav": "Status",
+    "Poznámka": "Note",
+}
+
+
+def to_english_display(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with English user-facing headers, preserving row data."""
+    return frame.rename(columns=DISPLAY_COLUMN_LABELS).copy()
+
 SIZE_ORDER = {
     "XXS": 10,
     "XS": 20,
@@ -391,19 +434,19 @@ def write_import_no_stock_excel(
             cell.border = border
 
         integer_columns = {
-            "Počet EAN",
+            "EAN count",
             "Local warehouse 101",
             "Local warehouse 501",
             "Central warehouse",
-            "Celkem ks všechny sklady",
+            "Total units (all warehouses)",
         }
-        money_columns = {"MOC CZK", "MOC EUR"}
+        money_columns = {"RRP CZK", "RRP EUR"}
         for row_idx, row in enumerate(frame.itertuples(index=False), start=5):
             for col_idx, value in enumerate(row, start=1):
                 header = frame.columns[col_idx - 1]
                 cell = ws.cell(row=row_idx, column=col_idx, value=value)
                 cell.border = border
-                cell.alignment = Alignment(vertical="center", wrap_text=header in {"Název", "Composition"})
+                cell.alignment = Alignment(vertical="center", wrap_text=header in {"Product name", "Composition"})
                 if header in integer_columns:
                     cell.number_format = "#,##0"
                 elif header in money_columns:
@@ -412,9 +455,9 @@ def write_import_no_stock_excel(
         ws.freeze_panes = "A5"
         ws.auto_filter.ref = f"A4:{get_column_letter(len(frame.columns))}{4 + len(frame)}"
         widths = {
-            "Importovaný požadavek": 24,
-            "Artikl": 16,
-            "Název": 34,
+            "Imported request": 24,
+            "Style / colour": 18,
+            "Product name": 34,
             "Gender": 12,
             "Division": 16,
             "Segment": 16,
@@ -427,18 +470,18 @@ def write_import_no_stock_excel(
             "Color group": 16,
             "Color name": 22,
             "Color code": 12,
-            "Materiál": 16,
+            "Material": 24,
             "Composition": 36,
-            "Velikosti v masteru": 24,
-            "Počet EAN": 12,
+            "Sizes in master": 24,
+            "EAN count": 12,
             "Local warehouse 101": 18,
             "Local warehouse 501": 18,
             "Central warehouse": 18,
-            "Celkem ks všechny sklady": 24,
-            "MOC CZK": 13,
-            "MOC EUR": 13,
-            "Stav": 20,
-            "Poznámka": 36,
+            "Total units (all warehouses)": 24,
+            "RRP CZK": 13,
+            "RRP EUR": 13,
+            "Status": 20,
+            "Note": 36,
         }
         for idx, column_name in enumerate(frame.columns, start=1):
             ws.column_dimensions[get_column_letter(idx)].width = widths.get(column_name, 16)
@@ -449,23 +492,23 @@ def write_import_no_stock_excel(
     if report.empty:
         report = pd.DataFrame(columns=NO_STOCK_IMPORT_COLUMNS)
     write_sheet(
-        "Bez zásoby",
+        "Unavailable imports",
         title,
         "Products exist in master data but have zero total quantity across Local warehouse 101, Local warehouse 501 and Central warehouse.",
-        report,
+        to_english_display(report),
     )
 
     missing = normalize_style_selectors(missing_master_selectors)
     if missing:
         missing_df = pd.DataFrame(
             {
-                "Importovaný požadavek": missing,
-                "Stav": "Nenalezeno v masteru",
-                "Poznámka": "No matching style or style-colour reference exists in the uploaded master data.",
+                "Imported request": missing,
+                "Status": "Not found in master data",
+                "Note": "No matching style or style-colour reference exists in the uploaded master data.",
             }
         )
         write_sheet(
-            "Mimo master",
+            "Not in master data",
             "Imported references not found in master data",
             "These values could not be matched to the uploaded master data, so product attributes are not available.",
             missing_df,
@@ -534,7 +577,7 @@ SUBSTITUTION_ALTERNATIVE_COLUMNS = [
     "Top style",
 ]
 
-ALTERNATIVE_ENGINE_VERSION = "v12"
+ALTERNATIVE_ENGINE_VERSION = "v13"
 
 
 
@@ -641,31 +684,31 @@ def _price_match_score(target_price: float, candidate_price: float) -> tuple[int
         return 0, None
     difference = abs(candidate_price - target_price) / target_price
     if difference <= 0.05:
-        return 15, "téměř shodná MOC"
+        return 15, "very close RRP"
     if difference <= 0.15:
-        return 11, "podobná MOC"
+        return 11, "similar RRP"
     if difference <= 0.25:
-        return 7, "srovnatelná MOC"
+        return 7, "comparable RRP"
     if difference <= 0.50:
-        return 3, "přibližná MOC"
+        return 3, "approximate RRP"
     return 0, None
 
 
 PRODUCT_FAMILY_PATTERNS = (
     ("polo", re.compile(r"\bpolo\b", re.IGNORECASE)),
-    ("tričko", re.compile(r"\btee\b|t[ -]?shirt", re.IGNORECASE)),
-    ("kraťasy", re.compile(r"\bshorts?\b", re.IGNORECASE)),
-    ("legíny", re.compile(r"\bleggings?\b", re.IGNORECASE)),
-    ("kalhoty", re.compile(r"\bpants?\b|\btrousers?\b", re.IGNORECASE)),
-    ("bunda", re.compile(r"\bjacket\b", re.IGNORECASE)),
-    ("mikina", re.compile(r"\bhoodie\b|\bhooded\b", re.IGNORECASE)),
-    ("vesta", re.compile(r"\bvest\b", re.IGNORECASE)),
-    ("podprsenka", re.compile(r"\bbra\b", re.IGNORECASE)),
-    ("sukně", re.compile(r"\bskirt\b", re.IGNORECASE)),
-    ("kšilt", re.compile(r"\bvisor\b", re.IGNORECASE)),
-    ("čepice", re.compile(r"\bcap\b|\bhat\b", re.IGNORECASE)),
-    ("ponožky", re.compile(r"\bsocks?\b", re.IGNORECASE)),
-    ("boty", re.compile(r"\bshoe\b|\bshoes\b|\bsneaker\b|\bcleat\b", re.IGNORECASE)),
+    ("t-shirt", re.compile(r"\btee\b|t[ -]?shirt", re.IGNORECASE)),
+    ("shorts", re.compile(r"\bshorts?\b", re.IGNORECASE)),
+    ("leggings", re.compile(r"\bleggings?\b", re.IGNORECASE)),
+    ("pants", re.compile(r"\bpants?\b|\btrousers?\b", re.IGNORECASE)),
+    ("jacket", re.compile(r"\bjacket\b", re.IGNORECASE)),
+    ("hoodie", re.compile(r"\bhoodie\b|\bhooded\b", re.IGNORECASE)),
+    ("vest", re.compile(r"\bvest\b", re.IGNORECASE)),
+    ("bra", re.compile(r"\bbra\b", re.IGNORECASE)),
+    ("skirt", re.compile(r"\bskirt\b", re.IGNORECASE)),
+    ("visor", re.compile(r"\bvisor\b", re.IGNORECASE)),
+    ("cap", re.compile(r"\bcap\b|\bhat\b", re.IGNORECASE)),
+    ("socks", re.compile(r"\bsocks?\b", re.IGNORECASE)),
+    ("shoes", re.compile(r"\bshoe\b|\bshoes\b|\bsneaker\b|\bcleat\b", re.IGNORECASE)),
 )
 
 
@@ -751,42 +794,42 @@ def _match_new_style_pool(
         _candidate_pool(
             working,
             same_color_group & same_end_use & category_match,
-            "jiný styl + stejná barva + použití + střih",
+            "different style + same colour + end use + silhouette",
         ),
         _candidate_pool(
             working,
             same_color_group & same_end_use,
-            "jiný styl + stejná barva + použití",
+            "different style + same colour + end use",
         ),
         _candidate_pool(
             working,
             same_color_group & category_match,
-            "jiný styl + stejná barva + střih",
+            "different style + same colour + silhouette",
         ),
         _candidate_pool(
             working,
             same_color_group,
-            "jiný styl + stejná barva",
+            "different style + same colour",
         ),
         _candidate_pool(
             working,
             same_end_use & category_match,
-            "jiný styl + použití + střih (jiná barva)",
+            "different style + end use + silhouette (different colour)",
         ),
         _candidate_pool(
             working,
             same_end_use,
-            "jiný styl + použití (jiná barva)",
+            "different style + end use (different colour)",
         ),
         _candidate_pool(
             working,
             category_match,
-            "jiný styl + střih (jiná barva)",
+            "different style + silhouette (different colour)",
         ),
         _candidate_pool(
             working,
             pd.Series(True, index=working.index),
-            "jiný styl – širší alternativa",
+            "different style – broader alternative",
         ),
     ]
     return next((pool for pool in pools if pool is not None), None)
@@ -812,45 +855,45 @@ def _rank_alternative_candidates(
         candidate_family = _product_family_tokens(candidate.get("Název", ""))
         matching_family = sorted(target_family & candidate_family)
 
-        if alternative_type == "Stejný styl, jiná barva":
+        if alternative_type == "Same style, different colour":
             score += 140
-            reasons.append("stejný styl, jiná dostupná barva")
+            reasons.append("same style, another available colour")
         else:
-            reasons.append("jiný dostupný styl")
+            reasons.append("different available style")
 
         if matching_family:
             score += 60
-            reasons.append(f"stejný typ produktu: {', '.join(matching_family)}")
+            reasons.append(f"same product family: {', '.join(matching_family)}")
 
         if _same_attribute(target, candidate, "Gender"):
             score += 35
-            reasons.append("stejné pohlaví")
+            reasons.append("same gender")
         if _same_attribute(target, candidate, "Division"):
             score += 25
         if _same_attribute(target, candidate, "Segment"):
             score += 10
-            reasons.append("stejná kategorie")
+            reasons.append("same segment")
         if _same_attribute(target, candidate, "Silhouette"):
             score += 24
-            reasons.append("stejný střih")
+            reasons.append("same silhouette")
         if _same_attribute(target, candidate, "Detail silhouette"):
             score += 30
-            reasons.append("stejný detail střihu")
+            reasons.append("same detail silhouette")
         if _same_attribute(target, candidate, "Fit"):
             score += 12
-            reasons.append("stejný fit")
+            reasons.append("same fit")
         if _same_attribute(target, candidate, "End use"):
             score += 28
-            reasons.append("stejné použití")
+            reasons.append("same end use")
         if _same_attribute(target, candidate, "Materiál"):
             score += 7
-            reasons.append("stejný materiál")
+            reasons.append("same material")
         if _same_attribute(target, candidate, "Color group"):
             score += 35
-            reasons.append("stejná barevná skupina")
+            reasons.append("same color group")
         if _same_attribute(target, candidate, "Color name"):
             score += 12
-            reasons.append("stejný název barvy")
+            reasons.append("same color name")
         if _same_attribute(target, candidate, "Season"):
             score += 3
 
@@ -895,7 +938,7 @@ def _alternative_rows(
     rows: list[dict[str, object]] = []
     for order, item in enumerate(ranked, start=start_order):
         candidate = item["_candidate"]
-        reasons = item["_reasons"] or ["nejbližší dostupná alternativa podle dostupných atributů"]
+        reasons = item["_reasons"] or ["closest available alternative based on matching attributes"]
         rows.append(
             {
                 "Importovaný požadavek": target.get("Importovaný požadavek", ""),
@@ -927,7 +970,7 @@ def _alternative_rows(
                 "Celkem ks všechny sklady": candidate.get("Celkem ks všechny sklady", 0),
                 "Dostupné velikosti ve vybraných skladech": candidate.get("Dostupné velikosti ve vybraných skladech", ""),
                 "Plný sizerun": candidate.get("Plný sizerun", ""),
-                "Top style": "Ano" if bool(candidate.get("Top style", False)) else "",
+                "Top style": "Yes" if bool(candidate.get("Top style", False)) else "",
             }
         )
     return rows
@@ -990,8 +1033,8 @@ def _recommendations_for_target(
             same_style_ranked = _rank_alternative_candidates(
                 target,
                 same_style_candidates,
-                "Stejný styl, jiná barva",
-                "stejný styl, jiná dostupná barva",
+                "Same style, different colour",
+                "same style, another available colour",
             )
 
         new_style_candidates = available.loc[
@@ -1006,7 +1049,7 @@ def _recommendations_for_target(
         new_style_ranked = _rank_alternative_candidates(
             target,
             new_style_pool,
-            "Jiný styl, stejná barva",
+            "Different style, same colour",
             new_style_label,
         )
 
@@ -1177,7 +1220,7 @@ def write_import_substitution_excel(
     missing_master_selectors: Sequence[object] = (),
     title: str = "Imported UA products unavailable and alternatives",
 ) -> bytes:
-    """Write a practical substitution workbook for imported products."""
+    """Write an English substitution workbook for imported products."""
     wb = Workbook()
     header_fill = PatternFill("solid", fgColor="1F2937")
     header_font = Font(color="FFFFFF", bold=True)
@@ -1200,17 +1243,20 @@ def write_import_substitution_excel(
             cell.border = border
 
         integer_columns = {
-            "Celkem ks všechny sklady", "Dostupnost ve vybraných skladech",
-            "Pořadí alternativy", "Skóre shody",
+            "Total units (all warehouses)", "Selected warehouse availability",
+            "Alternative rank", "Match score", "EAN count",
         }
-        money_columns = {"MOC CZK", "MOC EUR", "MOC nedostupného CZK", "MOC nedostupného EUR"}
+        money_columns = {"RRP CZK", "RRP EUR", "Original RRP CZK", "Original RRP EUR"}
         for row_idx, row in enumerate(frame.itertuples(index=False), start=5):
             for col_idx, value in enumerate(row, start=1):
                 header = frame.columns[col_idx - 1]
                 cell = ws.cell(row=row_idx, column=col_idx, value=value)
                 cell.border = border
-                cell.alignment = Alignment(vertical="center", wrap_text=header in {"Název", "Důvod doporučení", "Composition"})
-                if sheet_name == "Alternativy" and header.startswith("Alternativa"):
+                cell.alignment = Alignment(
+                    vertical="center",
+                    wrap_text=header in {"Product name", "Unavailable product", "Alternative product", "Recommendation reason", "Composition"},
+                )
+                if sheet_name == "Alternatives" and header.startswith("Alternative"):
                     cell.fill = alternative_fill
                 if header in integer_columns:
                     cell.number_format = "#,##0"
@@ -1220,14 +1266,14 @@ def write_import_substitution_excel(
         ws.freeze_panes = "A5"
         ws.auto_filter.ref = f"A4:{get_column_letter(len(frame.columns))}{4 + len(frame)}"
         widths = {
-            "Importovaný požadavek": 24,
-            "Artikl": 16,
-            "Nedostupný artikl": 18,
-            "Alternativa – artikl": 19,
-            "Název": 34,
-            "Nedostupný název": 34,
-            "Alternativa – název": 34,
-            "Důvod doporučení": 44,
+            "Imported request": 24,
+            "Style / colour": 18,
+            "Unavailable style / colour": 20,
+            "Alternative style / colour": 21,
+            "Product name": 34,
+            "Unavailable product": 34,
+            "Alternative product": 34,
+            "Recommendation reason": 44,
             "Gender": 12,
             "Division": 16,
             "Segment": 16,
@@ -1240,41 +1286,45 @@ def write_import_substitution_excel(
             "Color group": 16,
             "Color name": 22,
             "Color code": 12,
-            "Materiál": 16,
+            "Material": 24,
             "Composition": 34,
-            "MOC CZK": 14,
-            "MOC EUR": 14,
-            "MOC nedostupného CZK": 22,
-            "MOC nedostupného EUR": 22,
-            "Barva nedostupného": 18,
-            "Úroveň shody": 32,
-            "Dostupnost ve vybraných skladech": 26,
-            "Celkem ks všechny sklady": 24,
-            "Dostupné velikosti ve vybraných skladech": 30,
-            "Plný sizerun": 14,
+            "RRP CZK": 14,
+            "RRP EUR": 14,
+            "Original RRP CZK": 18,
+            "Original RRP EUR": 18,
+            "Original color group": 18,
+            "Match level": 34,
+            "Selected warehouse availability": 28,
+            "Total units (all warehouses)": 25,
+            "Available sizes in selected warehouses": 32,
+            "Full size run": 14,
             "Top style": 12,
-            "Pořadí alternativy": 16,
-            "Skóre shody": 14,
-            "Stav": 22,
-            "Poznámka": 42,
+            "Alternative rank": 16,
+            "Match score": 14,
+            "Status": 22,
+            "Note": 42,
         }
         for idx, column_name in enumerate(frame.columns, start=1):
             ws.column_dimensions[get_column_letter(idx)].width = widths.get(column_name, 16)
         ws.row_dimensions[1].height = 22
         ws.row_dimensions[4].height = 34
 
-    unavailable = unavailable_df.copy().reindex(columns=SUBSTITUTION_TARGET_COLUMNS)
-    alternatives = alternatives_df.copy().reindex(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+    unavailable = to_english_display(
+        unavailable_df.copy().reindex(columns=SUBSTITUTION_TARGET_COLUMNS)
+    )
+    alternatives = to_english_display(
+        alternatives_df.copy().reindex(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+    )
     write_sheet(
-        "Nedostupné z importu",
+        "Unavailable imports",
         title,
         "Imported style-colours that exist in master data but have zero stock in Local warehouse 101, Local warehouse 501 and Central warehouse.",
         unavailable,
     )
     write_sheet(
-        "Alternativy",
+        "Alternatives",
         "Recommended available alternatives",
-        "Alternatives can follow two routes: the same style in another available colour, or a different available style in the requested colour. The exact unavailable style-colour is always excluded. For a different style, product family (for example Polo), gender, division, colour, end use and cut are prioritized before fit, material, price and selected-warehouse availability.",
+        "Alternatives can follow two routes: the same style in another available colour, or a different available style in the requested colour. The exact unavailable style-colour is always excluded. For a different style, product family (for example Polo), gender, division, colour, end use and silhouette are prioritised before fit, material, RRP and selected-warehouse availability.",
         alternatives,
     )
 
@@ -1282,13 +1332,13 @@ def write_import_substitution_excel(
     if missing:
         missing_df = pd.DataFrame(
             {
-                "Importovaný požadavek": missing,
-                "Stav": "Nenalezeno v masteru",
-                "Poznámka": "Produkt nebyl v aktuálním masteru nalezen; bez atributů nelze vytvořit relevantní automatické alternativy.",
+                "Imported request": missing,
+                "Status": "Not found in master data",
+                "Note": "The product was not found in the current master data; attributes are unavailable, so relevant automatic alternatives cannot be created.",
             }
         )
         write_sheet(
-            "Mimo master",
+            "Not in master data",
             "Imported references not found in master data",
             "These values could not be matched to the uploaded master data.",
             missing_df,
@@ -1332,16 +1382,16 @@ def is_top_style(value) -> bool:
 def material_group(value) -> str:
     """Classify textile composition for quick material filters.
 
-    Cotton blends are intentionally classed as Bavlna. Technical therefore
-    means a textile composition without cotton that contains common technical
-    fibres such as polyester, elastane, nylon or polyamide.
+    Cotton blends are classified as Cotton. The performance group means a
+    composition without cotton that contains common fibres such as polyester,
+    elastane, nylon or polyamide.
     """
     text = str(value or "").casefold()
     if re.search(r"cotton|bavlna", text):
-        return "Bavlna"
+        return "Cotton"
     if re.search(r"polyester|elastane|spandex|nylon|polyamid|polyamide|polypropylene", text):
-        return "Technické"
-    return "Ostatní / neurčeno"
+        return "Polyester / performance"
+    return "Other / unclassified"
 
 
 def standard_size(size: str) -> str:
@@ -1609,7 +1659,7 @@ def add_stock_metrics(data: pd.DataFrame, selected_warehouses: Sequence[str]) ->
 
     out["_full_sizerun"] = out["Artikl"].map(full_flags)
     out["Plný sizerun"] = out["_full_sizerun"].map(
-        lambda value: "Ano" if value is True else ("Ne" if value is False else "")
+        lambda value: "Yes" if value is True else ("No" if value is False else "")
     )
     return out
 
@@ -1679,9 +1729,9 @@ def apply_filters(
         if technical_material or cotton_material:
             material_options = set()
             if technical_material:
-                material_options.add("Technické")
+                material_options.add("Polyester / performance")
             if cotton_material:
-                material_options.add("Bavlna")
+                material_options.add("Cotton")
             mask &= data["Materiál"].isin(material_options)
 
         if only_top_styles:
@@ -1725,13 +1775,13 @@ def _currency_flags(export_currency: str) -> tuple[bool, bool]:
 
 def price_includes_vat(price_vat_mode: str) -> bool:
     """Return whether the requested final offer price is VAT-inclusive."""
-    value = str(price_vat_mode or "Bez DPH").strip().casefold()
-    return value in {"s dph", "včetně dph", "vcetne dph", "including vat", "with vat"}
+    value = str(price_vat_mode or "Excl. VAT").strip().casefold()
+    return value in {"incl. vat", "including vat", "with vat", "s dph", "včetně dph", "vcetne dph"}
 
 
 def offer_price_column_name(currency: str, price_vat_mode: str) -> str:
-    suffix = "s DPH" if price_includes_vat(price_vat_mode) else "bez DPH"
-    return f"Nabídková cena {currency} {suffix}"
+    suffix = "incl. VAT" if price_includes_vat(price_vat_mode) else "excl. VAT"
+    return f"Offer price {currency} {suffix}"
 
 
 def to_offer_table(
@@ -1740,26 +1790,26 @@ def to_offer_table(
     export_currency: str = "CZK + EUR",
     discount_percent: float | None = None,
     vat_rate: float = 0.21,
-    price_vat_mode: str = "Bez DPH",
+    price_vat_mode: str = "Excl. VAT",
 ) -> pd.DataFrame:
-    """Build the offer table and, optionally, final negotiated price columns.
+    """Build an English offer table and optional negotiated price columns.
 
-    MOC is VAT-inclusive. Final export can show either a discounted price
-    without VAT or the discounted VAT-inclusive price. A ``None`` discount
-    keeps preview output neutral and shows only the MOC columns.
+    RRP values in the master are VAT-inclusive. The final export can show a
+    discounted offer price either excluding VAT or including VAT. A ``None``
+    discount keeps the preview neutral and shows only the RRP columns.
     """
     include_czk, include_eur = _currency_flags(export_currency)
     base = {
-        "Artikl": filtered["Artikl"],
+        "Style / colour": filtered["Artikl"],
         "Size": filtered["Size"],
-        "Název": filtered["Název"],
+        "Product name": filtered["Název"],
         "Local warehouse 101": filtered["Local warehouse 101"].map(display_qty),
         "Local warehouse 501": filtered["Local warehouse 501"].map(display_qty),
         "Central warehouse": filtered["Central warehouse"].map(display_qty),
-        "Celkem ks styl/barva": filtered["Celkem ks styl/barva"],
-        "Plný sizerun": filtered["Plný sizerun"],
-        "Top style": filtered["Top style"].map(lambda value: "Ano" if bool(value) else ""),
-        "Materiál": filtered["Materiál"],
+        "Total units / style-colour": filtered["Celkem ks styl/barva"],
+        "Full size run": filtered["Plný sizerun"],
+        "Top style": filtered["Top style"].map(lambda value: "Yes" if bool(value) else ""),
+        "Material": filtered["Materiál"],
         "ORDER": "",
     }
 
@@ -1768,22 +1818,22 @@ def to_offer_table(
         vat_value = max(0.0, float(vat_rate))
         discounted_factor = 1 - discount_value / 100
         price_factor = discounted_factor if price_includes_vat(price_vat_mode) else discounted_factor / (1 + vat_value)
-        base["Sleva %"] = discount_value
+        base["Discount %"] = discount_value
         if include_czk:
-            base["MOC CZK"] = filtered["MOC CZK"]
+            base["RRP CZK"] = filtered["MOC CZK"]
             base[offer_price_column_name("CZK", price_vat_mode)] = (
                 filtered["MOC CZK"] * price_factor
             ).round(2)
         if include_eur:
-            base["MOC EUR"] = filtered["MOC EUR"]
+            base["RRP EUR"] = filtered["MOC EUR"]
             base[offer_price_column_name("EUR", price_vat_mode)] = (
                 filtered["MOC EUR"] * price_factor
             ).round(2)
     else:
         if include_czk:
-            base["MOC CZK"] = filtered["MOC CZK"]
+            base["RRP CZK"] = filtered["MOC CZK"]
         if include_eur:
-            base["MOC EUR"] = filtered["MOC EUR"]
+            base["RRP EUR"] = filtered["MOC EUR"]
 
     base.update(
         {
@@ -1801,9 +1851,8 @@ def to_offer_table(
     if include_extra_columns:
         for col in EXTRA_COLUMNS:
             if col in filtered.columns:
-                offer[col] = filtered[col]
+                offer[DISPLAY_COLUMN_LABELS.get(col, col)] = filtered[col]
     return offer
-
 
 def write_offer_excel(
     offer_df: pd.DataFrame,
@@ -1811,8 +1860,9 @@ def write_offer_excel(
     discount_percent: float | None = None,
     export_currency: str = "CZK + EUR",
     vat_rate: float = 0.21,
-    price_vat_mode: str = "Bez DPH",
+    price_vat_mode: str = "Excl. VAT",
 ) -> bytes:
+    """Write the customer-facing English offer workbook."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Offer"
@@ -1832,9 +1882,9 @@ def write_offer_excel(
             row=3,
             column=1,
             value=(
-                f"Currency: {export_currency} | Discount from VAT-inclusive MOC: "
-                f"{float(discount_percent):g} % | VAT: {float(vat_rate) * 100:g} % | "
-                f"Offer prices: {'including VAT' if price_includes_vat(price_vat_mode) else 'without VAT'}."
+                f"Currency: {export_currency} | Discount from VAT-inclusive RRP: "
+                f"{float(discount_percent):g}% | VAT: {float(vat_rate) * 100:g}% | "
+                f"Offer prices: {'including VAT' if price_includes_vat(price_vat_mode) else 'excluding VAT'}."
             ),
         )
 
@@ -1847,15 +1897,14 @@ def write_offer_excel(
         cell.border = border
 
     integer_columns = {
-        "Celkem ks styl/barva",
-        "Dostupnost ve vybraných skladech",
-        "Total available",
-        "Dostupné velikosti styl/barva",
+        "Total units / style-colour",
+        "Selected warehouse availability",
+        "Total availability (all warehouses)",
+        "Available sizes / style-colour",
     }
-    money_columns = {"MOC CZK", "MOC EUR"}
+    money_columns = {"RRP CZK", "RRP EUR"}
     discounted_price_columns = {
-        column for column in offer_df.columns
-        if str(column).startswith("Nabídková cena ")
+        column for column in offer_df.columns if str(column).startswith("Offer price ")
     }
     money_columns |= discounted_price_columns
     for row_idx, row in enumerate(offer_df.itertuples(index=False), start=start_row + 1):
@@ -1872,7 +1921,7 @@ def write_offer_excel(
                 cell.number_format = "@"
             elif header in money_columns:
                 cell.number_format = "#,##0.00"
-            elif header == "Sleva %":
+            elif header == "Discount %":
                 cell.number_format = "0.0"
             elif header in integer_columns:
                 cell.number_format = "#,##0"
@@ -1883,26 +1932,26 @@ def write_offer_excel(
     )
 
     widths = {
-        "Artikl": 16,
+        "Style / colour": 18,
         "Size": 10,
-        "Název": 34,
+        "Product name": 34,
         "Local warehouse 101": 18,
         "Local warehouse 501": 18,
         "Central warehouse": 18,
-        "Celkem ks styl/barva": 21,
-        "Dostupnost ve vybraných skladech": 24,
-        "Dostupné velikosti styl/barva": 25,
-        "Plný sizerun": 14,
+        "Total units / style-colour": 24,
+        "Selected warehouse availability": 26,
+        "Available sizes / style-colour": 28,
+        "Full size run": 14,
         "Top style": 12,
-        "Materiál": 16,
+        "Material": 24,
         "ORDER": 12,
-        "Sleva %": 12,
-        "MOC CZK": 13,
-        "MOC EUR": 13,
-        "Nabídková cena CZK bez DPH": 26,
-        "Nabídková cena EUR bez DPH": 26,
-        "Nabídková cena CZK s DPH": 24,
-        "Nabídková cena EUR s DPH": 24,
+        "Discount %": 12,
+        "RRP CZK": 13,
+        "RRP EUR": 13,
+        "Offer price CZK excl. VAT": 26,
+        "Offer price EUR excl. VAT": 26,
+        "Offer price CZK incl. VAT": 26,
+        "Offer price EUR incl. VAT": 26,
         "EAN": 18,
         "Gender": 12,
         "Silhouette": 14,
@@ -1913,9 +1962,9 @@ def write_offer_excel(
         "Color group": 14,
         "Color name": 22,
         "Color code": 12,
-        "Detail silhouette": 18,
+        "Detail silhouette": 20,
         "Composition": 34,
-        "Total available": 15,
+        "Total availability (all warehouses)": 26,
         "Style code": 14,
     }
     for idx, column_name in enumerate(offer_df.columns, start=1):
