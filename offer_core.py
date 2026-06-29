@@ -311,7 +311,6 @@ def build_dataset(
 def product_type_mask(
     data: pd.DataFrame,
     product_types: Sequence[str],
-    exclude_cotton: bool,
 ) -> pd.Series:
     if not product_types:
         return pd.Series(True, index=data.index)
@@ -328,8 +327,6 @@ def product_type_mask(
                 regex=True,
             )
             mask = division_apparel & top_mask & detail_mask
-            if exclude_cotton:
-                mask &= ~data["Composition"].str.contains("cotton|bavlna", case=False, na=False, regex=True)
             masks.append(mask)
         elif product_type == "Shorts":
             detail_mask = data["Detail silhouette"].str.contains("shorts", case=False, na=False)
@@ -451,7 +448,6 @@ def apply_filters(
     detail_silhouettes: Sequence[str] = (),
     fits: Sequence[str] = (),
     co_values: Sequence[str] = (),
-    exclude_cotton: bool = True,
     technical_material: bool = False,
     cotton_material: bool = False,
     only_top_styles: bool = False,
@@ -460,9 +456,9 @@ def apply_filters(
     data = add_stock_metrics(data, selected_warehouses)
     mask = pd.Series(True, index=data.index)
 
-    # Cotton checkbox intentionally overrides the legacy "Exclude cotton" setting.
-    effective_exclude_cotton = exclude_cotton and not cotton_material
-    mask &= product_type_mask(data, product_types, effective_exclude_cotton)
+    # Product type and material are independent filters. Material restrictions
+    # are applied below only when one or both material checkboxes are selected.
+    mask &= product_type_mask(data, product_types)
 
     if genders:
         mask &= data["Gender"].isin(genders)
