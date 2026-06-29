@@ -2,24 +2,36 @@
 
 from __future__ import annotations
 
+import traceback
+
 import pandas as pd
 import streamlit as st
 
-from offer_core import (
-    ALTERNATIVE_ENGINE_VERSION,
-    add_selected_alternatives_to_offer,
-    apply_filters,
-    build_dataset,
-    imported_unavailable_with_alternatives,
-    read_excel,
-    read_style_selectors_excel,
-    to_english_display,
-    to_offer_table,
-    unique_sorted,
-    unmatched_style_selectors,
-    write_import_substitution_excel,
-    write_offer_excel,
-)
+# Keep the import explicit, but catch it so Streamlit Cloud shows the precise
+# underlying error instead of its generic redacted ImportError screen.
+try:
+    from offer_core import (
+        ALTERNATIVE_ENGINE_VERSION,
+        add_selected_alternatives_to_offer,
+        apply_filters,
+        build_dataset,
+        imported_unavailable_with_alternatives,
+        read_excel,
+        read_style_selectors_excel,
+        to_english_display,
+        to_offer_table,
+        unique_sorted,
+        unmatched_style_selectors,
+        write_import_substitution_excel,
+        write_offer_excel,
+    )
+except Exception as exc:  # pragma: no cover - deployment diagnostic
+    st.set_page_config(page_title="UA Offer Generator – diagnostic", layout="wide")
+    st.error("The deployed app.py cannot import the deployed offer_core.py.")
+    st.write("This is normally caused by a mismatched branch, file path or older offer_core.py in the Streamlit deployment.")
+    st.code(traceback.format_exc(), language="text")
+    st.info("Replace app.py and offer_core.py from the same v13.1 package in the exact folder configured as Streamlit's Main file path, then reboot the app.")
+    st.stop()
 
 APP_TITLE = "UA Offer Generator"
 
