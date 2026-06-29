@@ -534,7 +534,7 @@ SUBSTITUTION_ALTERNATIVE_COLUMNS = [
     "Top style",
 ]
 
-ALTERNATIVE_ENGINE_VERSION = "v11"
+ALTERNATIVE_ENGINE_VERSION = "v12"
 
 
 
@@ -1096,6 +1096,79 @@ def imported_unavailable_with_alternatives(
         else pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
     )
     return targets, alternatives
+
+
+def add_selected_alternatives_to_offer(
+    data: pd.DataFrame,
+    base_offer: pd.DataFrame,
+    selected_warehouses: Sequence[str],
+    selected_alternatives: pd.DataFrame | None,
+    replace_selected_unavailable: bool = True,
+) -> pd.DataFrame:
+    """Append user-chosen alternatives to the final offer.
+
+    The normal import mode is deliberately preserved: base rows come from the
+    imported file and bypass all standard filters. This helper then adds the
+    explicit replacement choices from the alternatives table, also bypassing
+    those regular filters, so the final export matches the commercial choice
+    made in the Streamlit UI.
+
+    When ``replace_selected_unavailable`` is true, only the exact unavailable
+    style/colour that belongs to a checked alternative is removed. Other zero
+    stock imports remain visible until the user selects a replacement for them.
+    """
+    if selected_alternatives is None or selected_alternatives.empty:
+        return base_offer.copy()
+    if "Alternativa – artikl" not in selected_alternatives.columns:
+        return base_offer.copy()
+
+    choices = selected_alternatives.copy()
+    if "Přidat do nabídky" in choices.columns:
+        choices = choices.loc[choices["Přidat do nabídky"].fillna(False).astype(bool)].copy()
+    if choices.empty:
+        return base_offer.copy()
+
+    alternative_keys = set(
+        _normalized_article_series(
+            pd.DataFrame({"Artikl": choices["Alternativa – artikl"]})
+        ).tolist()
+    )
+    alternative_keys.discard("")
+    if not alternative_keys:
+        return base_offer.copy()
+
+    enriched = add_stock_metrics(data, selected_warehouses)
+    enriched_keys = _normalized_article_series(enriched)
+    selected_rows = enriched.loc[enriched_keys.isin(alternative_keys)].copy()
+    if selected_rows.empty:
+        return base_offer.copy()
+
+    final_rows = base_offer.copy()
+    if replace_selected_unavailable and "Nedostupný artikl" in choices.columns:
+        unavailable_keys = set(
+            _normalized_article_series(
+                pd.DataFrame({"Artikl": choices["Nedostupný artikl"]})
+            ).tolist()
+        )
+        unavailable_keys.discard("")
+        if unavailable_keys and not final_rows.empty:
+            base_keys = _normalized_article_series(final_rows)
+            final_rows = final_rows.loc[~base_keys.isin(unavailable_keys)].copy()
+
+    combined = pd.concat([final_rows, selected_rows], ignore_index=True, sort=False)
+    if combined.empty:
+        return combined
+
+    combined["_article_sort"] = _normalized_article_series(combined)
+    combined["_size_sort"] = combined["Size"].map(size_sort_value)
+    dedupe_columns = [column for column in ["Artikl", "EAN"] if column in combined.columns]
+    if dedupe_columns:
+        combined = combined.drop_duplicates(subset=dedupe_columns, keep="first")
+    combined = combined.sort_values(["_article_sort", "_size_sort", "Size", "EAN"])
+    return combined.drop(
+        columns=["_article_sort", "_size_sort", "_core_size", "_full_sizerun"],
+        errors="ignore",
+    )
 
 
 def write_import_substitution_excel(
