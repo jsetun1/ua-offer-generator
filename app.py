@@ -11,6 +11,7 @@ from offer_core import (
     read_excel,
     read_style_selectors_excel,
     imported_unavailable_with_alternatives,
+    add_selected_alternatives_to_offer,
     to_offer_table,
     unique_sorted,
     unmatched_style_selectors,
@@ -169,6 +170,9 @@ def main() -> None:
         include_extra_columns = st.checkbox("Include helper columns in export", value=False)
 
     selected_style_refs: list[str] = []
+    selected_alternatives_df = None
+    replacement_mode = "replace_selected"
+
     if style_import_file is not None:
         try:
             selected_style_refs = read_style_selectors_excel(style_import_file)
@@ -246,6 +250,81 @@ def main() -> None:
                         st.info("Pro tyto položky nebyla ve vybraných skladech nalezena vhodná dostupná alternativa.")
                     else:
                         st.dataframe(alternatives_df, use_container_width=True, hide_index=True)
+
+            if not alternatives_df.empty:
+                st.subheader("Vyber alternativy pro finální nabídku")
+                st.caption(
+                    "Zaškrtněte produkty, které mají být přidány do finální nabídky. U každé nedostupné položky "
+                    "zpravidla vyberte jednu preferovanou náhradu; lze vybrat i více variant. Každý vybraný produkt "
+                    "se přidá se všemi dostupnými EAN/velikostmi a aktuální zásobou ve zvolených skladech."
+                )
+                selection_columns = [
+                    "Importovaný požadavek",
+                    "Nedostupný artikl",
+                    "Nedostupný název",
+                    "Alternativa – artikl",
+                    "Alternativa – název",
+                    "Typ alternativy",
+                    "MOC CZK",
+                    "MOC EUR",
+                    "Dostupnost ve vybraných skladech",
+                    "Dostupné velikosti ve vybraných skladech",
+                    "Důvod doporučení",
+                ]
+                selection_table = alternatives_df.loc[:, selection_columns].copy()
+                selection_table.insert(0, "Přidat do nabídky", False)
+                selection_signature = "|".join(
+                    alternatives_df[["Nedostupný artikl", "Alternativa – artikl"]]
+                    .fillna("")
+                    .astype(str)
+                    .agg("→".join, axis=1)
+                    .tolist()
+                )
+                if st.session_state.get("alternative_selection_signature_v12") != selection_signature:
+                    st.session_state["alternative_selection_signature_v12"] = selection_signature
+                    st.session_state.pop("alternative_offer_selection_v12", None)
+                edited_selection = st.data_editor(
+                    selection_table,
+                    key="alternative_offer_selection_v12",
+                    hide_index=True,
+                    use_container_width=True,
+                    height=min(520, max(180, 42 * (len(selection_table) + 1))),
+                    disabled=[column for column in selection_table.columns if column != "Přidat do nabídky"],
+                    column_config={
+                        "Přidat do nabídky": st.column_config.CheckboxColumn(
+                            "Přidat do nabídky",
+                            help="Vybraný produkt bude součástí finálního XLSX exportu.",
+                            default=False,
+                        ),
+                    },
+                )
+                selected_alternatives_df = edited_selection.loc[
+                    edited_selection["Přidat do nabídky"].fillna(False).astype(bool)
+                ].copy()
+                if not selected_alternatives_df.empty:
+                    replacement_mode_label = st.radio(
+                        "Jak pracovat s původní nedostupnou položkou ve finálním exportu",
+                        options=[
+                            "Nahradit ji vybranou alternativou",
+                            "Ponechat ji v nabídce i s nulovou zásobou",
+                        ],
+                        index=0,
+                        horizontal=True,
+                        help=(
+                            "První volba odebere pouze konkrétní nedostupný artikl, pro který jste vybrali "
+                            "alternativu. Ostatní importované položky zůstávají beze změny."
+                        ),
+                    )
+                    replacement_mode = (
+                        "replace_selected"
+                        if replacement_mode_label == "Nahradit ji vybranou alternativou"
+                        else "keep_original"
+                    )
+                    st.info(
+                        f"Do finální nabídky bude přidáno {selected_alternatives_df['Alternativa – artikl'].nunique()} "
+                        "unikátních alternativních stylů / barev."
+                    )
+
             if unmatched:
                 preview_unmatched = ", ".join(unmatched[:12])
                 suffix = " …" if len(unmatched) > 12 else ""
@@ -292,10 +371,20 @@ def main() -> None:
         selected_style_refs=selected_style_refs,
     )
 
+    offer_rows = filtered
+    if selected_alternatives_df is not None and not selected_alternatives_df.empty:
+        offer_rows = add_selected_alternatives_to_offer(
+            data=data,
+            base_offer=filtered,
+            selected_warehouses=selected_warehouses,
+            selected_alternatives=selected_alternatives_df,
+            replace_selected_unavailable=replacement_mode == "replace_selected",
+        )
+
     # Preview remains neutral: it shows both MOC currencies and does not yet
     # add a negotiated discount. Final currency and discount are chosen below.
     preview_df = to_offer_table(
-        filtered,
+        offer_rows,
         include_extra_columns=include_extra_columns,
         export_currency="CZK + EUR",
         discount_percent=None,
@@ -303,8 +392,8 @@ def main() -> None:
 
     st.header("3. Preview")
     full_sizerun_count = (
-        filtered.loc[filtered["Plný sizerun"].eq("Ano"), "Artikl"].nunique()
-        if not filtered.empty
+        offer_rows.loc[offer_rows["Plný sizerun"].eq("Ano"), "Artikl"].nunique()
+        if not offer_rows.empty
         else 0
     )
     kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
@@ -312,21 +401,21 @@ def main() -> None:
     kpi2.metric("Style / colour", f"{preview_df['Artikl'].nunique() if not preview_df.empty else 0:,}")
     kpi3.metric(
         "Selected availability",
-        f"{int(filtered['Dostupnost ve vybraných skladech'].sum()) if not filtered.empty else 0:,}",
+        f"{int(offer_rows['Dostupnost ve vybraných skladech'].sum()) if not offer_rows.empty else 0:,}",
     )
     kpi4.metric("Full sizeruns", f"{full_sizerun_count:,}")
     kpi5.metric(
         "Average MOC CZK",
-        f"{filtered['MOC CZK'].mean():,.0f}" if not filtered.empty else "-",
+        f"{offer_rows['MOC CZK'].mean():,.0f}" if not offer_rows.empty else "-",
     )
     kpi6.metric(
         "Average MOC EUR",
-        f"{filtered['MOC EUR'].mean():,.0f}" if not filtered.empty else "-",
+        f"{offer_rows['MOC EUR'].mean():,.0f}" if not offer_rows.empty else "-",
     )
 
     st.dataframe(preview_df.head(500), use_container_width=True, hide_index=True)
     if len(preview_df) > 500:
-        st.caption("Preview shows first 500 rows only. Export contains all filtered rows.")
+        st.caption("Preview shows first 500 rows only. Export contains all selected offer rows.")
 
     st.header("4. Final pricing and export")
     export_col1, export_col2, export_col3 = st.columns([1, 1, 1])
@@ -371,7 +460,7 @@ def main() -> None:
         )
 
     final_offer_df = to_offer_table(
-        filtered,
+        offer_rows,
         include_extra_columns=include_extra_columns,
         export_currency=export_currency,
         discount_percent=float(discount_percent),
@@ -435,7 +524,9 @@ def main() -> None:
             Alternatives use the warehouses selected for the current offer. The **exact unavailable style/colour** is always
             excluded, but a different available colourway of the same style is a valid option when the customer wants to keep
             the fit and price. The alternative strategy lets you choose between **same style / another colour**, **same colour /
-            another style**, or a balanced mix. When another style is requested and a product type can be recognized from the
+            another style**, or a balanced mix. **Selected alternatives** can be checked directly in the app and flow into
+            the preview and final XLSX report with their current EANs, available sizes and warehouse availability. You can choose
+            whether a checked alternative replaces its exact zero-stock import or is added alongside it. When another style is requested and a product type can be recognized from the
             name (for example, **Polo**), it is preserved first. The app then prioritizes colour, gender, division, end use and
             cut; fit, material, segment and MOC determine the order among usable matches.
 
