@@ -8,8 +8,10 @@ from offer_core import (
     apply_filters,
     build_dataset,
     read_excel,
+    read_style_selectors_excel,
     to_offer_table,
     unique_sorted,
+    unmatched_style_selectors,
     write_offer_excel,
 )
 
@@ -141,6 +143,16 @@ def main() -> None:
         )
 
     with col4:
+        style_import_file = st.file_uploader(
+            "Import stylů / stylů-barvy (XLSX)",
+            type=["xlsx"],
+            help=(
+                "V prvním listu vložte styly do buněk pod sebe. Hodnota 1326799 vybere všechny "
+                "barvy stylu; 1326799-036 (případně 1326799/036) vybere pouze konkrétní styl/barvu. "
+                "Při importu se neaplikuje filtr Color group / color logic."
+            ),
+            key="style_import_file",
+        )
         seasons = st.multiselect("Season", unique_sorted(data, "Season"), default=[])
         end_uses = st.multiselect("End use", unique_sorted(data, "End use"), default=[])
         detail_silhouettes = st.multiselect(
@@ -151,6 +163,30 @@ def main() -> None:
         fits = st.multiselect("Fit", fit_options, default=[])
         co_values = st.multiselect("C/O", unique_sorted(data, "C/O"), default=[])
         include_extra_columns = st.checkbox("Include helper columns in export", value=False)
+
+    selected_style_refs: list[str] = []
+    if style_import_file is not None:
+        try:
+            selected_style_refs = read_style_selectors_excel(style_import_file)
+        except Exception as exc:
+            st.error(f"Style import failed: {exc}")
+            st.stop()
+
+        if not selected_style_refs:
+            st.warning(
+                "No valid styles found in the imported file. Use values such as 1326799 or 1326799-036."
+            )
+            st.stop()
+        else:
+            unmatched = unmatched_style_selectors(data, selected_style_refs)
+            st.caption(
+                f"Style import loaded: {len(selected_style_refs)} unique selection(s). "
+                "Base styles include all colours; exact style-colour values include only that colour."
+            )
+            if unmatched:
+                preview_unmatched = ", ".join(unmatched[:12])
+                suffix = " …" if len(unmatched) > 12 else ""
+                st.warning(f"Not found in master data: {preview_unmatched}{suffix}")
 
     filtered = apply_filters(
         data=data,
@@ -174,6 +210,7 @@ def main() -> None:
         cotton_material=cotton_material,
         only_top_styles=only_top_styles,
         only_full_sizerun=only_full_sizerun,
+        selected_style_refs=selected_style_refs,
     )
 
     # Preview remains neutral: it shows both MOC currencies and does not yet
@@ -213,7 +250,7 @@ def main() -> None:
         st.caption("Preview shows first 500 rows only. Export contains all filtered rows.")
 
     st.header("4. Final pricing and export")
-    export_col1, export_col2 = st.columns([1, 1])
+    export_col1, export_col2, export_col3 = st.columns([1, 1, 1])
     with export_col1:
         discount_percent = st.number_input(
             "Sleva z MOC včetně DPH (%)",
@@ -234,11 +271,25 @@ def main() -> None:
             horizontal=True,
             help="Vyberte, zda má export obsahovat ceny v CZK, EUR, nebo obou měnách.",
         )
+    with export_col3:
+        price_vat_mode = st.radio(
+            "Cena po slevě v exportu",
+            options=["Bez DPH", "S DPH"],
+            index=0,
+            horizontal=True,
+            help="Volí, zda se výsledná nabídková cena po slevě zobrazí bez DPH nebo včetně DPH.",
+        )
 
-    st.caption(
-        "Nabídková cena bez DPH = MOC × (1 − sleva) / 1,21. "
-        "DPH je pevně 21 %. Příklad: 999 CZK při slevě 40 % = 495,37 CZK bez DPH."
-    )
+    if price_vat_mode == "S DPH":
+        st.caption(
+            "Nabídková cena s DPH = MOC × (1 − sleva). "
+            "DPH je 21 % a MOC se již bere včetně DPH. Příklad: 999 CZK při slevě 40 % = 599,40 CZK s DPH."
+        )
+    else:
+        st.caption(
+            "Nabídková cena bez DPH = MOC × (1 − sleva) / 1,21. "
+            "DPH je pevně 21 %. Příklad: 999 CZK při slevě 40 % = 495,37 CZK bez DPH."
+        )
 
     final_offer_df = to_offer_table(
         filtered,
@@ -246,6 +297,7 @@ def main() -> None:
         export_currency=export_currency,
         discount_percent=float(discount_percent),
         vat_rate=0.21,
+        price_vat_mode=price_vat_mode,
     )
 
     file_name = st.text_input("Output filename", value="ua_offer.xlsx")
@@ -260,6 +312,7 @@ def main() -> None:
             discount_percent=float(discount_percent),
             export_currency=export_currency,
             vat_rate=0.21,
+            price_vat_mode=price_vat_mode,
         )
         st.download_button(
             label="Download Excel offer",
@@ -290,9 +343,14 @@ def main() -> None:
             XS, S, M, L and XL. Each of those sizes must have stock in the selected
             warehouses. UA size labels SM / MD / LG and XXL are converted automatically.
 
-            **Final discount and currency**: choose CZK, EUR or both currencies before
-            downloading. The offer adds MOC, one discount percentage and the resulting
-            offer price without VAT. The calculation is `MOC × (1 − discount) / 1.21`.
+            **Style import (XLSX)**: insert styles in cells under one another in the first
+            worksheet. `1326799` returns every available colour of the base style;
+            `1326799-036` (or `1326799/036`) returns only that exact style/colour. When this import is used,
+            the generic colour filter is ignored so that the requested colour logic remains exact.
+
+            **Final discount, currency and VAT mode**: choose CZK, EUR or both currencies,
+            then whether the final discounted price is **Bez DPH** or **S DPH**. The first
+            variant is `MOC × (1 − discount) / 1.21`; the second is `MOC × (1 − discount)`.
             VAT is fixed at 21 %.
 
             **Central warehouse** = sum of the first two `Week` columns in the central
