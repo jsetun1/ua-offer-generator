@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from offer_core import (
+    ALTERNATIVE_ENGINE_VERSION,
     apply_filters,
     build_dataset,
     read_excel,
@@ -182,13 +183,33 @@ def main() -> None:
             st.stop()
         else:
             unmatched = unmatched_style_selectors(data, selected_style_refs)
+            alternative_strategy_label = st.radio(
+                "Strategie doporučených alternativ",
+                options=[
+                    "Obě varianty",
+                    "Stejný styl – jiná barva",
+                    "Stejná barva – jiný styl",
+                ],
+                index=0,
+                help=(
+                    "Stejný styl zachová střih a obvykle i cenu, ale nabídne jinou dostupnou barvu. "
+                    "Stejná barva hledá jiný dostupný styl, například jiné pánské šedé golfové polo. "
+                    "Volba Obě varianty zobrazí vyvážený mix obou cest."
+                ),
+            )
+            alternative_strategy = {
+                "Obě varianty": "both",
+                "Stejný styl – jiná barva": "same_style",
+                "Stejná barva – jiný styl": "same_color_new_style",
+            }[alternative_strategy_label]
             alternative_count = st.selectbox(
                 "Počet automaticky navržených alternativ",
                 options=[3, 5, 8],
                 index=1,
                 help=(
                     "Alternativy se hledají pouze mezi produkty dostupnými ve skladech, "
-                    "které jsou zvolené v poli Availability source used for filtering."
+                    "které jsou zvolené v poli Availability source used for filtering. U volby "
+                    "Obě varianty se počet rozdělí mezi obě cesty; nevyužitá místa doplní druhá cesta."
                 ),
             )
             unavailable_import_df, alternatives_df = imported_unavailable_with_alternatives(
@@ -196,6 +217,7 @@ def main() -> None:
                 style_selectors=selected_style_refs,
                 selected_warehouses=selected_warehouses,
                 max_alternatives=int(alternative_count),
+                alternative_strategy=alternative_strategy,
             )
             st.success(
                 f"Import mode is active: {len(selected_style_refs)} unique selection(s) loaded. "
@@ -211,9 +233,11 @@ def main() -> None:
                 )
                 with st.expander("Nedostupné položky z importu a doporučené alternativy", expanded=False):
                     st.caption(
-                        "Alternativy jsou vždy jiný UA styl, nikoli jen jiná barva stejného stylu. "
-                        "Nejprve se zachovává barva, pohlaví, division, použití a střih; následně se porovnává "
-                        "typ produktu, fit, materiál a MOC. Dostupnost alternativ odpovídá aktuálně vybraným skladům."
+                        f"Alternativy v{ALTERNATIVE_ENGINE_VERSION.replace('v', '')}: přesně nedostupný artikl "
+                        "je vždy vyloučen. Podle zvolené strategie aplikace buď nabídne stejný styl v jiné "
+                        "dostupné barvě, nebo jiný dostupný styl ve stejné barvě. U jiného stylu nejprve drží "
+                        "typ produktu (např. Polo), pohlaví, division, použití a střih; poté řadí fit, materiál, "
+                        "segment, MOC a zásobu. Dostupnost alternativ odpovídá aktuálně vybraným skladům."
                     )
                     st.subheader("Nedostupné z importu")
                     st.dataframe(unavailable_import_df, use_container_width=True, hide_index=True)
@@ -408,9 +432,12 @@ def main() -> None:
             If imported products are present in the master but have **zero stock in all three uploaded warehouses**,
             an immediate list and download appear below the import. The file contains the unavailable imported products,
             ranked available alternatives, and a separate sheet for valid imported values not found in master data.
-            Alternatives use the warehouses selected for the current offer and are always a **different UA base style**.
-            They first seek the same colour, gender, division, end use and cut, then compare product family, fit,
-            material and MOC. A different colourway of the same style is never offered as an alternative.
+            Alternatives use the warehouses selected for the current offer. The **exact unavailable style/colour** is always
+            excluded, but a different available colourway of the same style is a valid option when the customer wants to keep
+            the fit and price. The alternative strategy lets you choose between **same style / another colour**, **same colour /
+            another style**, or a balanced mix. When another style is requested and a product type can be recognized from the
+            name (for example, **Polo**), it is preserved first. The app then prioritizes colour, gender, division, end use and
+            cut; fit, material, segment and MOC determine the order among usable matches.
 
             **Final discount, currency and VAT mode**: choose CZK, EUR or both currencies,
             then whether the final discounted price is **Bez DPH** or **S DPH**. The first
