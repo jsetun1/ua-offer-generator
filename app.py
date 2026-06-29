@@ -9,9 +9,11 @@ from offer_core import (
     build_dataset,
     read_excel,
     read_style_selectors_excel,
+    imported_unavailable_with_alternatives,
     to_offer_table,
     unique_sorted,
     unmatched_style_selectors,
+    write_import_substitution_excel,
     write_offer_excel,
 )
 
@@ -179,14 +181,64 @@ def main() -> None:
             st.stop()
         else:
             unmatched = unmatched_style_selectors(data, selected_style_refs)
+            alternative_count = st.selectbox(
+                "Počet automaticky navržených alternativ",
+                options=[3, 5, 8],
+                index=1,
+                help=(
+                    "Alternativy se hledají pouze mezi produkty dostupnými ve skladech, "
+                    "které jsou zvolené v poli Availability source used for filtering."
+                ),
+            )
+            unavailable_import_df, alternatives_df = imported_unavailable_with_alternatives(
+                data=data,
+                style_selectors=selected_style_refs,
+                selected_warehouses=selected_warehouses,
+                max_alternatives=int(alternative_count),
+            )
             st.caption(
                 f"Style import loaded: {len(selected_style_refs)} unique selection(s). "
                 "Base styles include all colours; exact style-colour values include only that colour."
             )
+
+            if not unavailable_import_df.empty:
+                st.warning(
+                    f"{len(unavailable_import_df)} imported style / colour item(s) exist in master data "
+                    "but have zero stock across all uploaded warehouses."
+                )
+                with st.expander("Nedostupné položky z importu a doporučené alternativy", expanded=False):
+                    st.caption(
+                        "Alternativy jsou řazené podle shody pohlaví, kategorie, střihu, fitu, použití, "
+                        "materiálu a MOC. Přednost má jiná dostupná barva stejného stylu. "
+                        "Dostupnost alternativ odpovídá aktuálně vybraným skladům."
+                    )
+                    st.subheader("Nedostupné z importu")
+                    st.dataframe(unavailable_import_df, use_container_width=True, hide_index=True)
+                    st.subheader("Doporučené alternativy")
+                    if alternatives_df.empty:
+                        st.info("Pro tyto položky nebyla ve vybraných skladech nalezena vhodná dostupná alternativa.")
+                    else:
+                        st.dataframe(alternatives_df, use_container_width=True, hide_index=True)
             if unmatched:
                 preview_unmatched = ", ".join(unmatched[:12])
                 suffix = " …" if len(unmatched) > 12 else ""
                 st.warning(f"Not found in master data: {preview_unmatched}{suffix}")
+
+            if not unavailable_import_df.empty or unmatched:
+                substitution_bytes = write_import_substitution_excel(
+                    unavailable_import_df,
+                    alternatives_df,
+                    unmatched,
+                )
+                st.download_button(
+                    label="Download nedostupných produktů a alternativ",
+                    data=substitution_bytes,
+                    file_name="ua_import_nedostupne_a_alternativy.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    help=(
+                        "Soubor obsahuje list Nedostupné z importu, list Alternativy a případně list Mimo master."
+                    ),
+                )
 
     filtered = apply_filters(
         data=data,
@@ -347,6 +399,11 @@ def main() -> None:
             worksheet. `1326799` returns every available colour of the base style;
             `1326799-036` (or `1326799/036`) returns only that exact style/colour. When this import is used,
             the generic colour filter is ignored so that the requested colour logic remains exact.
+            If imported products are present in the master but have **zero stock in all three uploaded warehouses**,
+            an immediate list and download appear below the import. The file contains the unavailable imported products,
+            ranked available alternatives, and a separate sheet for valid imported values not found in master data.
+            Alternatives use the warehouses selected for the current offer and rank similarity by gender, category,
+            silhouette, fit, end use, material and MOC; another available colour of the same style is preferred.
 
             **Final discount, currency and VAT mode**: choose CZK, EUR or both currencies,
             then whether the final discounted price is **Bez DPH** or **S DPH**. The first
