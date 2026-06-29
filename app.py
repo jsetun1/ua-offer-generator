@@ -1,4 +1,4 @@
-"""UA Offer Generator - Streamlit prototype."""
+"""UA Offer Generator - Streamlit app."""
 
 from __future__ import annotations
 
@@ -19,14 +19,25 @@ APP_TITLE = "UA Offer Generator"
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
-    st.caption("Prototype for generating Under Armour product offers from master data and warehouse files.")
+    st.caption("Generate Under Armour offers from master data and warehouse files.")
 
     with st.sidebar:
         st.header("1. Upload files")
-        master_file = st.file_uploader("Master data", type=["xlsx"], help="Must include EAN, Artikl, MOC CZK, MOC EUR, Color group/name and Composition.")
+        master_file = st.file_uploader(
+            "Master data",
+            type=["xlsx"],
+            help=(
+                "Must include EAN, Artikl, size, name, MOC CZK, MOC EUR and Composition. "
+                "For the Top style filter, use a Top style / Top styles column and mark any row of the base style with x."
+            ),
+        )
         local101_file = st.file_uploader("Local warehouse 101", type=["xlsx"])
         local501_file = st.file_uploader("Local warehouse 501", type=["xlsx"])
-        central_file = st.file_uploader("Central warehouse", type=["xlsx"], help="The app sums the first two Week columns.")
+        central_file = st.file_uploader(
+            "Central warehouse",
+            type=["xlsx"],
+            help="The app sums the first two Week columns.",
+        )
 
     if not all([master_file, local101_file, local501_file, central_file]):
         st.info("Upload all four files to start.")
@@ -43,16 +54,19 @@ def main() -> None:
         st.error(f"File loading failed: {exc}")
         st.stop()
 
-    st.success(f"Loaded {len(data):,} EAN rows from master data. Central availability = {' + '.join(central_cols)}.")
+    st.success(
+        f"Loaded {len(data):,} EAN rows from master data. "
+        f"Central availability = {' + '.join(central_cols)}."
+    )
 
     st.header("2. Offer criteria")
     col1, col2, col3, col4 = st.columns(4)
+
     gender_options = unique_sorted(data, "Gender")
     detail_silhouette_options = unique_sorted(data, "Detail silhouette")
     fit_options = unique_sorted(data, "Fit")
-    moc_eur_max_default = int(max(float(data["MOC EUR"].max()) if "MOC EUR" in data.columns and not data["MOC EUR"].empty else 0, 0))
-    if moc_eur_max_default <= 0:
-        moc_eur_max_default = 999
+    moc_eur_max_default = int(max(float(data["MOC EUR"].max()), 999))
+    moc_czk_max_default = int(max(float(data["MOC CZK"].max()), 999))
 
     with col1:
         product_types = st.multiselect(
@@ -60,8 +74,22 @@ def main() -> None:
             ["Technical T-shirts", "Shorts", "Tops", "Footwear", "Accessories"],
             default=["Technical T-shirts"],
         )
-        genders = st.multiselect("Gender", gender_options, default=["Mens"] if "Mens" in gender_options else [])
-        exclude_cotton = st.checkbox("Exclude cotton", value=True)
+        genders = st.multiselect(
+            "Gender",
+            gender_options,
+            default=["Mens"] if "Mens" in gender_options else [],
+        )
+
+        st.markdown("**Material**")
+        technical_material = st.checkbox("Technické", value=False)
+        cotton_material = st.checkbox("Bavlna", value=False)
+        exclude_cotton = st.checkbox(
+            "Exclude cotton (Technical T-shirts)",
+            value=True,
+            help="When Bavlna is selected, this legacy setting is automatically ignored.",
+        )
+        only_top_styles = st.checkbox("Only Top styles", value=False)
+
     with col2:
         colors = st.multiselect(
             "Color group / color logic",
@@ -69,22 +97,62 @@ def main() -> None:
             default=["Black", "Dark Blue"],
         )
         price_min = st.number_input("MOC CZK from", min_value=0, value=0, step=100)
-        price_max = st.number_input("MOC CZK to", min_value=0, value=999, step=100)
+        price_max = st.number_input(
+            "MOC CZK to",
+            min_value=0,
+            value=min(999, moc_czk_max_default),
+            step=100,
+        )
         price_eur_min = st.number_input("MOC EUR from", min_value=0, value=0, step=5)
-        price_eur_max = st.number_input("MOC EUR to", min_value=0, value=moc_eur_max_default, step=5)
+        price_eur_max = st.number_input(
+            "MOC EUR to",
+            min_value=0,
+            value=moc_eur_max_default,
+            step=5,
+        )
+
     with col3:
         selected_warehouses = st.multiselect(
             "Availability source used for filtering",
             ["Local warehouse 101", "Local warehouse 501", "Central warehouse"],
             default=["Local warehouse 101", "Local warehouse 501", "Central warehouse"],
         )
-        min_total_available = st.number_input("Minimum selected availability per EAN", min_value=0, value=1, step=1)
-        min_article_qty = st.number_input("Minimum total availability per article", min_value=0, value=1, step=1)
-        min_article_sizes = st.number_input("Minimum available sizes per article", min_value=1, value=1, step=1)
+        min_total_available = st.number_input(
+            "Minimum selected availability per EAN",
+            min_value=0,
+            value=1,
+            step=1,
+        )
+        min_style_color_qty = st.number_input(
+            "Minimum total pieces per style / colour",
+            min_value=0,
+            value=1,
+            step=1,
+            help=(
+                "Sum of all EAN rows with the same Artikl (style + colour), "
+                "calculated from the selected warehouses."
+            ),
+        )
+        min_article_sizes = st.number_input(
+            "Minimum available sizes per style / colour",
+            min_value=1,
+            value=1,
+            step=1,
+        )
+        only_full_sizerun = st.checkbox(
+            "Only full sizerun",
+            value=False,
+            help="Mens: S–2XL. Womens: XS–XL. Every core size must have stock in the selected warehouses.",
+        )
+
     with col4:
         seasons = st.multiselect("Season", unique_sorted(data, "Season"), default=[])
         end_uses = st.multiselect("End use", unique_sorted(data, "End use"), default=[])
-        detail_silhouettes = st.multiselect("Sleeve / detail silhouette", detail_silhouette_options, default=[])
+        detail_silhouettes = st.multiselect(
+            "Sleeve / detail silhouette",
+            detail_silhouette_options,
+            default=[],
+        )
         fits = st.multiselect("Fit", fit_options, default=[])
         co_values = st.multiselect("C/O", unique_sorted(data, "C/O"), default=[])
         include_extra_columns = st.checkbox("Include helper columns in export", value=False)
@@ -100,25 +168,44 @@ def main() -> None:
         price_eur_max=float(price_eur_max),
         selected_warehouses=selected_warehouses,
         min_total_available=int(min_total_available),
+        min_style_color_qty=int(min_style_color_qty),
+        min_article_sizes=int(min_article_sizes),
         seasons=seasons,
         end_uses=end_uses,
         detail_silhouettes=detail_silhouettes,
         fits=fits,
         co_values=co_values,
         exclude_cotton=exclude_cotton,
-        min_article_qty=int(min_article_qty),
-        min_article_sizes=int(min_article_sizes),
+        technical_material=technical_material,
+        cotton_material=cotton_material,
+        only_top_styles=only_top_styles,
+        only_full_sizerun=only_full_sizerun,
     )
 
     offer_df = to_offer_table(filtered, include_extra_columns=include_extra_columns)
 
     st.header("3. Preview")
-    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+    full_sizerun_count = (
+        filtered.loc[filtered["Plný sizerun"].eq("Ano"), "Artikl"].nunique()
+        if not filtered.empty
+        else 0
+    )
+    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
     kpi1.metric("EAN rows", f"{len(offer_df):,}")
-    kpi2.metric("Unique articles", f"{offer_df['Artikl'].nunique() if not offer_df.empty else 0:,}")
-    kpi3.metric("Total available", f"{int(filtered['Total available'].sum()) if not filtered.empty else 0:,}")
-    kpi4.metric("Average MOC CZK", f"{filtered['MOC CZK'].mean():,.0f}" if not filtered.empty else "-")
-    kpi5.metric("Average MOC EUR", f"{filtered['MOC EUR'].mean():,.0f}" if not filtered.empty else "-")
+    kpi2.metric("Style / colour", f"{offer_df['Artikl'].nunique() if not offer_df.empty else 0:,}")
+    kpi3.metric(
+        "Selected availability",
+        f"{int(filtered['Dostupnost ve vybraných skladech'].sum()) if not filtered.empty else 0:,}",
+    )
+    kpi4.metric("Full sizeruns", f"{full_sizerun_count:,}")
+    kpi5.metric(
+        "Average MOC CZK",
+        f"{filtered['MOC CZK'].mean():,.0f}" if not filtered.empty else "-",
+    )
+    kpi6.metric(
+        "Average MOC EUR",
+        f"{filtered['MOC EUR'].mean():,.0f}" if not filtered.empty else "-",
+    )
 
     st.dataframe(offer_df.head(500), use_container_width=True, hide_index=True)
     if len(offer_df) > 500:
@@ -132,7 +219,7 @@ def main() -> None:
     if offer_df.empty:
         st.warning("No products match the current filters.")
     else:
-        excel_bytes = write_offer_excel(offer_df, title="Under Armour Product Offer")
+        excel_bytes = write_offer_excel(offer_df)
         st.download_button(
             label="Download Excel offer",
             data=excel_bytes,
@@ -143,23 +230,27 @@ def main() -> None:
     with st.expander("Current filter logic"):
         st.markdown(
             """
-            **Technical T-shirts** = `Division = Apparel` + `Silhouette = Tops` + `Detail silhouette contains sleeve/sleeveless/tee`.
+            **Top styles**: the master column can be named `Top style` or `Top styles`.
+            Values `x`, `ano`, `yes`, `true` or `1` are accepted. A marker in any
+            EAN row makes the entire base style a Top style across all colours and sizes.
 
-            **Sleeve / detail silhouette** filters exact values from `Detail silhouette`, for example Short-Sleeves or Long-Sleeves.
+            **Technické / Bavlna**: a row containing `cotton` or `bavlna` in
+            `Composition` is Bavlna. Other compositions containing common performance
+            fibres such as polyester, elastane, nylon or polyamide are Technické.
 
-            **Fit** filters exact values from `Fit`, for example Loose, Fitted or Compression.
+            **Celkem ks styl/barva**: total stock across all EAN rows sharing `Artikl`
+            (UA style + colour), calculated from the currently selected warehouses.
+            It is shown in every export.
 
-            **MOC CZK** and **MOC EUR** filters are applied together. Set a wide range if you do not want one of them to restrict the result.
+            **Full sizerun**: Mens requires S, M, L, XL and 2XL; Womens requires
+            XS, S, M, L and XL. Each of those sizes must have stock in the selected
+            warehouses. UA size labels SM / MD / LG and XXL are converted automatically.
 
-            **Exclude cotton** removes rows where `Composition` contains `cotton`.
-
-            **Dark Blue** currently means `Color name` contains `Navy`, `Midnight`, or `Academy`.
-
-            **Central warehouse** = sum of the first two `Week` columns in the central warehouse file.
+            **Central warehouse** = sum of the first two `Week` columns in the central
+            warehouse file.
             """
         )
 
 
 if __name__ == "__main__":
     main()
-
