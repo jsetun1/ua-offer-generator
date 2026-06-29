@@ -218,6 +218,724 @@ def unmatched_style_selectors(data: pd.DataFrame, style_selectors: Sequence[obje
     ]
 
 
+NO_STOCK_IMPORT_COLUMNS = [
+    "Importovaný požadavek",
+    "Artikl",
+    "Název",
+    "Gender",
+    "Division",
+    "Segment",
+    "Silhouette",
+    "Detail silhouette",
+    "Fit",
+    "End use",
+    "Season",
+    "C/O",
+    "Color group",
+    "Color name",
+    "Color code",
+    "Materiál",
+    "Composition",
+    "Velikosti v masteru",
+    "Počet EAN",
+    "Local warehouse 101",
+    "Local warehouse 501",
+    "Central warehouse",
+    "Celkem ks všechny sklady",
+    "MOC CZK",
+    "MOC EUR",
+]
+
+
+def _normalized_article_series(data: pd.DataFrame) -> pd.Series:
+    """Return normalized UA style-colour keys for matching imported values."""
+    return (
+        clean_text(data["Artikl"])
+        .str.upper()
+        .str.replace("–", "-", regex=False)
+        .str.replace("—", "-", regex=False)
+        .str.replace("−", "-", regex=False)
+        .str.replace("/", "-", regex=False)
+        .str.replace(" ", "", regex=False)
+    )
+
+
+def _first_nonempty_value(group: pd.DataFrame, column: str):
+    """Get the first meaningful value from a style-colour group."""
+    if column not in group.columns:
+        return ""
+    for value in group[column].tolist():
+        if pd.notna(value) and str(value).strip() not in {"", "nan", "None"}:
+            return value
+    return ""
+
+
+def imported_no_stock_report(
+    data: pd.DataFrame,
+    style_selectors: Sequence[object],
+) -> pd.DataFrame:
+    """Build one row per imported style-colour with zero stock everywhere.
+
+    The report intentionally ignores the currently selected warehouse filter.
+    It checks the complete combined stock (101 + 501 + Central) so it answers
+    whether an imported item is unavailable at *all* uploaded warehouses.
+
+    Exact imported values (for example ``1326799-036``) inspect that one
+    style-colour. A base style (``1326799``) expands to all its colours and
+    reports every colour that has zero stock everywhere.
+    """
+    selectors = normalize_style_selectors(style_selectors)
+    if not selectors or data.empty:
+        return pd.DataFrame(columns=NO_STOCK_IMPORT_COLUMNS)
+
+    article_keys = _normalized_article_series(data)
+    style_codes = clean_text(data["Style code"]).str.upper()
+
+    # Preserve the import order, while avoiding duplicate rows when the import
+    # contains both a base style and an exact style-colour value.
+    requested_by_article: dict[str, list[str]] = {}
+    article_order: list[str] = []
+    for selector in selectors:
+        selector_mask = article_keys.eq(selector) if "-" in selector else style_codes.eq(selector)
+        for article_key in article_keys.loc[selector_mask].drop_duplicates().tolist():
+            if article_key not in requested_by_article:
+                requested_by_article[article_key] = []
+                article_order.append(article_key)
+            requested_by_article[article_key].append(selector)
+
+    rows: list[dict[str, object]] = []
+    for article_key in article_order:
+        group = data.loc[article_keys.eq(article_key)].copy()
+        if group.empty:
+            continue
+
+        stock_101 = int(round(to_number(group["Local warehouse 101"]).sum()))
+        stock_501 = int(round(to_number(group["Local warehouse 501"]).sum()))
+        stock_central = int(round(to_number(group["Central warehouse"]).sum()))
+        stock_total = stock_101 + stock_501 + stock_central
+        if stock_total != 0:
+            continue
+
+        sizes = sorted(
+            {value for value in clean_text(group["Size"]).tolist() if value},
+            key=size_sort_value,
+        )
+        rows.append(
+            {
+                "Importovaný požadavek": ", ".join(requested_by_article[article_key]),
+                "Artikl": _first_nonempty_value(group, "Artikl"),
+                "Název": _first_nonempty_value(group, "Název"),
+                "Gender": _first_nonempty_value(group, "Gender"),
+                "Division": _first_nonempty_value(group, "Division"),
+                "Segment": _first_nonempty_value(group, "Segment"),
+                "Silhouette": _first_nonempty_value(group, "Silhouette"),
+                "Detail silhouette": _first_nonempty_value(group, "Detail silhouette"),
+                "Fit": _first_nonempty_value(group, "Fit"),
+                "End use": _first_nonempty_value(group, "End use"),
+                "Season": _first_nonempty_value(group, "Season"),
+                "C/O": _first_nonempty_value(group, "C/O"),
+                "Color group": _first_nonempty_value(group, "Color group"),
+                "Color name": _first_nonempty_value(group, "Color name"),
+                "Color code": _first_nonempty_value(group, "Color code"),
+                "Materiál": _first_nonempty_value(group, "Materiál"),
+                "Composition": _first_nonempty_value(group, "Composition"),
+                "Velikosti v masteru": ", ".join(sizes),
+                "Počet EAN": int(len(group)),
+                "Local warehouse 101": stock_101,
+                "Local warehouse 501": stock_501,
+                "Central warehouse": stock_central,
+                "Celkem ks všechny sklady": stock_total,
+                "MOC CZK": float(to_number(group["MOC CZK"]).max()),
+                "MOC EUR": float(to_number(group["MOC EUR"]).max()),
+            }
+        )
+
+    return pd.DataFrame(rows, columns=NO_STOCK_IMPORT_COLUMNS)
+
+
+def write_import_no_stock_excel(
+    no_stock_df: pd.DataFrame,
+    missing_master_selectors: Sequence[object] = (),
+    title: str = "Imported UA products without stock",
+) -> bytes:
+    """Write a downloadable control report for imported styles.
+
+    The first worksheet lists style-colours existing in master data but absent
+    from every uploaded warehouse. A second sheet lists valid imported inputs
+    that do not exist in master data at all.
+    """
+    wb = Workbook()
+    header_fill = PatternFill("solid", fgColor="1F2937")
+    header_font = Font(color="FFFFFF", bold=True)
+    title_font = Font(size=14, bold=True, color="111827")
+    thin_side = Side(style="thin", color="D1D5DB")
+    border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+    def write_sheet(
+        sheet_name: str,
+        report_title: str,
+        note: str,
+        frame: pd.DataFrame,
+    ) -> None:
+        ws = wb.active if wb.active.title == "Sheet" else wb.create_sheet()
+        ws.title = sheet_name
+        ws.cell(row=1, column=1, value=report_title).font = title_font
+        ws.cell(row=2, column=1, value=f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        ws.cell(row=3, column=1, value=note)
+
+        for col_idx, column_name in enumerate(frame.columns, start=1):
+            cell = ws.cell(row=4, column=col_idx, value=column_name)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+
+        integer_columns = {
+            "Počet EAN",
+            "Local warehouse 101",
+            "Local warehouse 501",
+            "Central warehouse",
+            "Celkem ks všechny sklady",
+        }
+        money_columns = {"MOC CZK", "MOC EUR"}
+        for row_idx, row in enumerate(frame.itertuples(index=False), start=5):
+            for col_idx, value in enumerate(row, start=1):
+                header = frame.columns[col_idx - 1]
+                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = border
+                cell.alignment = Alignment(vertical="center", wrap_text=header in {"Název", "Composition"})
+                if header in integer_columns:
+                    cell.number_format = "#,##0"
+                elif header in money_columns:
+                    cell.number_format = "#,##0.00"
+
+        ws.freeze_panes = "A5"
+        ws.auto_filter.ref = f"A4:{get_column_letter(len(frame.columns))}{4 + len(frame)}"
+        widths = {
+            "Importovaný požadavek": 24,
+            "Artikl": 16,
+            "Název": 34,
+            "Gender": 12,
+            "Division": 16,
+            "Segment": 16,
+            "Silhouette": 16,
+            "Detail silhouette": 20,
+            "Fit": 16,
+            "End use": 16,
+            "Season": 12,
+            "C/O": 10,
+            "Color group": 16,
+            "Color name": 22,
+            "Color code": 12,
+            "Materiál": 16,
+            "Composition": 36,
+            "Velikosti v masteru": 24,
+            "Počet EAN": 12,
+            "Local warehouse 101": 18,
+            "Local warehouse 501": 18,
+            "Central warehouse": 18,
+            "Celkem ks všechny sklady": 24,
+            "MOC CZK": 13,
+            "MOC EUR": 13,
+            "Stav": 20,
+            "Poznámka": 36,
+        }
+        for idx, column_name in enumerate(frame.columns, start=1):
+            ws.column_dimensions[get_column_letter(idx)].width = widths.get(column_name, 16)
+        ws.row_dimensions[1].height = 22
+        ws.row_dimensions[4].height = 32
+
+    report = no_stock_df.copy()
+    if report.empty:
+        report = pd.DataFrame(columns=NO_STOCK_IMPORT_COLUMNS)
+    write_sheet(
+        "Bez zásoby",
+        title,
+        "Products exist in master data but have zero total quantity across Local warehouse 101, Local warehouse 501 and Central warehouse.",
+        report,
+    )
+
+    missing = normalize_style_selectors(missing_master_selectors)
+    if missing:
+        missing_df = pd.DataFrame(
+            {
+                "Importovaný požadavek": missing,
+                "Stav": "Nenalezeno v masteru",
+                "Poznámka": "No matching style or style-colour reference exists in the uploaded master data.",
+            }
+        )
+        write_sheet(
+            "Mimo master",
+            "Imported references not found in master data",
+            "These values could not be matched to the uploaded master data, so product attributes are not available.",
+            missing_df,
+        )
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+SUBSTITUTION_TARGET_COLUMNS = [
+    "Importovaný požadavek",
+    "Artikl",
+    "Název",
+    "Gender",
+    "Division",
+    "Segment",
+    "Silhouette",
+    "Detail silhouette",
+    "Fit",
+    "End use",
+    "Season",
+    "C/O",
+    "Color group",
+    "Color name",
+    "Color code",
+    "Materiál",
+    "Composition",
+    "MOC CZK",
+    "MOC EUR",
+    "Celkem ks všechny sklady",
+    "Dostupné velikosti ve vybraných skladech",
+]
+
+SUBSTITUTION_ALTERNATIVE_COLUMNS = [
+    "Importovaný požadavek",
+    "Nedostupný artikl",
+    "Nedostupný název",
+    "MOC nedostupného CZK",
+    "MOC nedostupného EUR",
+    "Pořadí alternativy",
+    "Skóre shody",
+    "Důvod doporučení",
+    "Alternativa – artikl",
+    "Alternativa – název",
+    "Gender",
+    "Division",
+    "Segment",
+    "Silhouette",
+    "Detail silhouette",
+    "Fit",
+    "End use",
+    "Materiál",
+    "Color group",
+    "Color name",
+    "MOC CZK",
+    "MOC EUR",
+    "Dostupnost ve vybraných skladech",
+    "Celkem ks všechny sklady",
+    "Dostupné velikosti ve vybraných skladech",
+    "Plný sizerun",
+    "Top style",
+]
+
+
+def _comparison_text(value: object) -> str:
+    """Normalize an attribute for substitution matching."""
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip().casefold()
+
+
+def _same_attribute(target: pd.Series, candidate: pd.Series, column: str) -> bool:
+    target_value = _comparison_text(target.get(column, ""))
+    candidate_value = _comparison_text(candidate.get(column, ""))
+    return bool(target_value and candidate_value and target_value == candidate_value)
+
+
+def _article_catalog(
+    data: pd.DataFrame,
+    selected_warehouses: Sequence[str],
+) -> pd.DataFrame:
+    """Build one product record per UA style / colour for substitution logic.
+
+    The stock source for recommendations is deliberately the same set of
+    warehouses currently selected in the offer filters. This prevents a
+    recommendation that is available only in an excluded warehouse.
+    """
+    if data.empty:
+        return pd.DataFrame()
+
+    enriched = add_stock_metrics(data, selected_warehouses)
+    records: list[dict[str, object]] = []
+    fields = [
+        "Artikl", "Style code", "Název", "Gender", "Division", "Segment",
+        "Silhouette", "Detail silhouette", "Fit", "End use", "Season", "C/O",
+        "Color group", "Color name", "Color code", "Materiál", "Composition",
+        "Top style", "Plný sizerun",
+    ]
+    for article, group in enriched.groupby("Artikl", sort=False):
+        available_sizes = sorted(
+            {
+                standard_size(value)
+                for value in group.loc[
+                    group["Dostupnost ve vybraných skladech"] > 0, "Size"
+                ].tolist()
+                if standard_size(value)
+            },
+            key=size_sort_value,
+        )
+        record = {
+            field: _first_nonempty_value(group, field)
+            for field in fields
+        }
+        record["Artikl"] = article
+        record["_article_key"] = _normalized_article_series(group).iloc[0]
+        record["MOC CZK"] = float(to_number(group["MOC CZK"]).max())
+        record["MOC EUR"] = float(to_number(group["MOC EUR"]).max())
+        record["Dostupnost ve vybraných skladech"] = int(
+            to_number(group["Dostupnost ve vybraných skladech"]).sum()
+        )
+        if "Total available" in group.columns:
+            all_stock_total = to_number(group["Total available"]).sum()
+        else:
+            all_stock_cols = [
+                column for column in ["Local warehouse 101", "Local warehouse 501", "Central warehouse"]
+                if column in group.columns
+            ]
+            all_stock_total = group[all_stock_cols].apply(to_number).sum(axis=1).sum() if all_stock_cols else 0
+        record["Celkem ks všechny sklady"] = int(all_stock_total)
+        record["Dostupné velikosti ve vybraných skladech"] = ", ".join(available_sizes)
+        records.append(record)
+
+    return pd.DataFrame(records)
+
+
+def _price_match_score(target_price: float, candidate_price: float) -> tuple[int, str | None]:
+    """Score price proximity without making it a hard exclusion."""
+    if target_price <= 0 or candidate_price <= 0:
+        return 0, None
+    difference = abs(candidate_price - target_price) / target_price
+    if difference <= 0.05:
+        return 15, "téměř shodná MOC"
+    if difference <= 0.15:
+        return 11, "podobná MOC"
+    if difference <= 0.25:
+        return 7, "srovnatelná MOC"
+    if difference <= 0.50:
+        return 3, "přibližná MOC"
+    return 0, None
+
+
+def _recommendations_for_target(
+    target: pd.Series,
+    catalog: pd.DataFrame,
+    max_alternatives: int,
+) -> pd.DataFrame:
+    """Return ranked in-stock substitutes for one unavailable style / colour."""
+    if catalog.empty:
+        return pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+
+    candidates = catalog.loc[
+        (catalog["Dostupnost ve vybraných skladech"] > 0)
+        & (catalog["_article_key"] != target.get("_article_key", ""))
+    ].copy()
+    if candidates.empty:
+        return pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+
+    target_style = _comparison_text(target.get("Style code", ""))
+    target_gender = _comparison_text(target.get("Gender", ""))
+    same_style = candidates["Style code"].map(_comparison_text).eq(target_style) if target_style else pd.Series(False, index=candidates.index)
+    same_gender = candidates["Gender"].map(_comparison_text).eq(target_gender) if target_gender else pd.Series(True, index=candidates.index)
+    same_division = candidates["Division"].map(_comparison_text).eq(_comparison_text(target.get("Division", ""))) if _comparison_text(target.get("Division", "")) else pd.Series(False, index=candidates.index)
+    same_segment = candidates["Segment"].map(_comparison_text).eq(_comparison_text(target.get("Segment", ""))) if _comparison_text(target.get("Segment", "")) else pd.Series(False, index=candidates.index)
+    same_silhouette = candidates["Silhouette"].map(_comparison_text).eq(_comparison_text(target.get("Silhouette", ""))) if _comparison_text(target.get("Silhouette", "")) else pd.Series(False, index=candidates.index)
+    same_detail = candidates["Detail silhouette"].map(_comparison_text).eq(_comparison_text(target.get("Detail silhouette", ""))) if _comparison_text(target.get("Detail silhouette", "")) else pd.Series(False, index=candidates.index)
+
+    # First keep true category matches. If that produces nothing, widen only
+    # enough to still preserve the requested gender / product division.
+    strict = same_style | (same_gender & same_division & (same_segment | same_silhouette | same_detail))
+    relaxed = same_style | (same_gender & same_division)
+    fallback = same_style | same_gender
+    if strict.any():
+        candidates = candidates.loc[strict].copy()
+    elif relaxed.any():
+        candidates = candidates.loc[relaxed].copy()
+    elif fallback.any():
+        candidates = candidates.loc[fallback].copy()
+
+    ranked: list[dict[str, object]] = []
+    for _, candidate in candidates.iterrows():
+        score = 0
+        reasons: list[str] = []
+        if target_style and _comparison_text(candidate.get("Style code", "")) == target_style:
+            score += 100
+            reasons.append("jiná barva stejného stylu")
+        if _same_attribute(target, candidate, "Gender"):
+            score += 25
+            reasons.append("stejné pohlaví")
+        if _same_attribute(target, candidate, "Division"):
+            score += 8
+        if _same_attribute(target, candidate, "Segment"):
+            score += 16
+            reasons.append("stejná kategorie")
+        if _same_attribute(target, candidate, "Silhouette"):
+            score += 18
+            reasons.append("stejný střih")
+        if _same_attribute(target, candidate, "Detail silhouette"):
+            score += 14
+            reasons.append("stejný detail střihu")
+        if _same_attribute(target, candidate, "Fit"):
+            score += 8
+            reasons.append("stejný fit")
+        if _same_attribute(target, candidate, "End use"):
+            score += 7
+            reasons.append("stejné použití")
+        if _same_attribute(target, candidate, "Materiál"):
+            score += 5
+            reasons.append("stejný materiál")
+        if _same_attribute(target, candidate, "Season"):
+            score += 3
+        price_score, price_reason = _price_match_score(
+            float(target.get("MOC CZK", 0) or 0),
+            float(candidate.get("MOC CZK", 0) or 0),
+        )
+        score += price_score
+        if price_reason:
+            reasons.append(price_reason)
+        if bool(candidate.get("Top style", False)):
+            score += 1
+
+        ranked.append(
+            {
+                "_score": score,
+                "_selected_qty": int(candidate.get("Dostupnost ve vybraných skladech", 0) or 0),
+                "_candidate": candidate,
+                "_reasons": reasons,
+            }
+        )
+
+    ranked.sort(
+        key=lambda item: (
+            -item["_score"],
+            -item["_selected_qty"],
+            str(item["_candidate"].get("Artikl", "")),
+        )
+    )
+
+    rows: list[dict[str, object]] = []
+    for order, item in enumerate(ranked[:max(1, int(max_alternatives))], start=1):
+        candidate = item["_candidate"]
+        reasons = item["_reasons"] or ["nejbližší dostupná varianta podle dostupných atributů"]
+        rows.append(
+            {
+                "Importovaný požadavek": target.get("Importovaný požadavek", ""),
+                "Nedostupný artikl": target.get("Artikl", ""),
+                "Nedostupný název": target.get("Název", ""),
+                "MOC nedostupného CZK": target.get("MOC CZK", 0),
+                "MOC nedostupného EUR": target.get("MOC EUR", 0),
+                "Pořadí alternativy": order,
+                "Skóre shody": item["_score"],
+                "Důvod doporučení": "; ".join(reasons),
+                "Alternativa – artikl": candidate.get("Artikl", ""),
+                "Alternativa – název": candidate.get("Název", ""),
+                "Gender": candidate.get("Gender", ""),
+                "Division": candidate.get("Division", ""),
+                "Segment": candidate.get("Segment", ""),
+                "Silhouette": candidate.get("Silhouette", ""),
+                "Detail silhouette": candidate.get("Detail silhouette", ""),
+                "Fit": candidate.get("Fit", ""),
+                "End use": candidate.get("End use", ""),
+                "Materiál": candidate.get("Materiál", ""),
+                "Color group": candidate.get("Color group", ""),
+                "Color name": candidate.get("Color name", ""),
+                "MOC CZK": candidate.get("MOC CZK", 0),
+                "MOC EUR": candidate.get("MOC EUR", 0),
+                "Dostupnost ve vybraných skladech": candidate.get("Dostupnost ve vybraných skladech", 0),
+                "Celkem ks všechny sklady": candidate.get("Celkem ks všechny sklady", 0),
+                "Dostupné velikosti ve vybraných skladech": candidate.get("Dostupné velikosti ve vybraných skladech", ""),
+                "Plný sizerun": candidate.get("Plný sizerun", ""),
+                "Top style": "Ano" if bool(candidate.get("Top style", False)) else "",
+            }
+        )
+
+    return pd.DataFrame(rows, columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+
+
+def imported_unavailable_with_alternatives(
+    data: pd.DataFrame,
+    style_selectors: Sequence[object],
+    selected_warehouses: Sequence[str],
+    max_alternatives: int = 5,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Create an unavailable-import list and ranked available alternatives.
+
+    A requested item enters the first table only if it has zero stock across
+    *all* uploaded warehouses. Recommendations then use the availability
+    sources selected in the current offer criteria, so they can immediately be
+    added to the offer.
+    """
+    unavailable = imported_no_stock_report(data, style_selectors).copy()
+    if unavailable.empty:
+        return (
+            pd.DataFrame(columns=SUBSTITUTION_TARGET_COLUMNS),
+            pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS),
+        )
+
+    catalog = _article_catalog(data, selected_warehouses)
+    if catalog.empty:
+        return unavailable.reindex(columns=SUBSTITUTION_TARGET_COLUMNS), pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+
+    target_rows: list[dict[str, object]] = []
+    all_alternatives: list[pd.DataFrame] = []
+    for _, unavailable_row in unavailable.iterrows():
+        article_key = _normalized_article_series(
+            pd.DataFrame({"Artikl": [unavailable_row.get("Artikl", "")]})
+        ).iloc[0]
+        target_candidates = catalog.loc[catalog["_article_key"].eq(article_key)]
+        if target_candidates.empty:
+            continue
+        target_catalog = target_candidates.iloc[0].copy()
+        target_catalog["Importovaný požadavek"] = unavailable_row.get("Importovaný požadavek", "")
+        # Ensure the unavailable record retains the richer master metadata and
+        # the full all-warehouse stock check from the no-stock report.
+        target_row = {
+            column: unavailable_row.get(column, target_catalog.get(column, ""))
+            for column in SUBSTITUTION_TARGET_COLUMNS
+        }
+        target_rows.append(target_row)
+        all_alternatives.append(
+            _recommendations_for_target(target_catalog, catalog, max_alternatives)
+        )
+
+    targets = pd.DataFrame(target_rows, columns=SUBSTITUTION_TARGET_COLUMNS)
+    alternative_frames = [frame for frame in all_alternatives if not frame.empty]
+    alternatives = (
+        pd.concat(alternative_frames, ignore_index=True)
+        if alternative_frames
+        else pd.DataFrame(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+    )
+    return targets, alternatives
+
+
+def write_import_substitution_excel(
+    unavailable_df: pd.DataFrame,
+    alternatives_df: pd.DataFrame,
+    missing_master_selectors: Sequence[object] = (),
+    title: str = "Imported UA products unavailable and alternatives",
+) -> bytes:
+    """Write a practical substitution workbook for imported products."""
+    wb = Workbook()
+    header_fill = PatternFill("solid", fgColor="1F2937")
+    header_font = Font(color="FFFFFF", bold=True)
+    title_font = Font(size=14, bold=True, color="111827")
+    thin_side = Side(style="thin", color="D1D5DB")
+    border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+    alternative_fill = PatternFill("solid", fgColor="E2F0D9")
+
+    def write_sheet(sheet_name: str, report_title: str, note: str, frame: pd.DataFrame) -> None:
+        ws = wb.active if wb.active.title == "Sheet" else wb.create_sheet()
+        ws.title = sheet_name
+        ws.cell(row=1, column=1, value=report_title).font = title_font
+        ws.cell(row=2, column=1, value=f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        ws.cell(row=3, column=1, value=note)
+        for col_idx, column_name in enumerate(frame.columns, start=1):
+            cell = ws.cell(row=4, column=col_idx, value=column_name)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+
+        integer_columns = {
+            "Celkem ks všechny sklady", "Dostupnost ve vybraných skladech",
+            "Pořadí alternativy", "Skóre shody",
+        }
+        money_columns = {"MOC CZK", "MOC EUR", "MOC nedostupného CZK", "MOC nedostupného EUR"}
+        for row_idx, row in enumerate(frame.itertuples(index=False), start=5):
+            for col_idx, value in enumerate(row, start=1):
+                header = frame.columns[col_idx - 1]
+                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = border
+                cell.alignment = Alignment(vertical="center", wrap_text=header in {"Název", "Důvod doporučení", "Composition"})
+                if sheet_name == "Alternativy" and header.startswith("Alternativa"):
+                    cell.fill = alternative_fill
+                if header in integer_columns:
+                    cell.number_format = "#,##0"
+                elif header in money_columns:
+                    cell.number_format = "#,##0.00"
+
+        ws.freeze_panes = "A5"
+        ws.auto_filter.ref = f"A4:{get_column_letter(len(frame.columns))}{4 + len(frame)}"
+        widths = {
+            "Importovaný požadavek": 24,
+            "Artikl": 16,
+            "Nedostupný artikl": 18,
+            "Alternativa – artikl": 19,
+            "Název": 34,
+            "Nedostupný název": 34,
+            "Alternativa – název": 34,
+            "Důvod doporučení": 44,
+            "Gender": 12,
+            "Division": 16,
+            "Segment": 16,
+            "Silhouette": 16,
+            "Detail silhouette": 22,
+            "Fit": 16,
+            "End use": 16,
+            "Season": 12,
+            "C/O": 10,
+            "Color group": 16,
+            "Color name": 22,
+            "Color code": 12,
+            "Materiál": 16,
+            "Composition": 34,
+            "MOC CZK": 14,
+            "MOC EUR": 14,
+            "MOC nedostupného CZK": 22,
+            "MOC nedostupného EUR": 22,
+            "Dostupnost ve vybraných skladech": 26,
+            "Celkem ks všechny sklady": 24,
+            "Dostupné velikosti ve vybraných skladech": 30,
+            "Plný sizerun": 14,
+            "Top style": 12,
+            "Pořadí alternativy": 16,
+            "Skóre shody": 14,
+            "Stav": 22,
+            "Poznámka": 42,
+        }
+        for idx, column_name in enumerate(frame.columns, start=1):
+            ws.column_dimensions[get_column_letter(idx)].width = widths.get(column_name, 16)
+        ws.row_dimensions[1].height = 22
+        ws.row_dimensions[4].height = 34
+
+    unavailable = unavailable_df.copy().reindex(columns=SUBSTITUTION_TARGET_COLUMNS)
+    alternatives = alternatives_df.copy().reindex(columns=SUBSTITUTION_ALTERNATIVE_COLUMNS)
+    write_sheet(
+        "Nedostupné z importu",
+        title,
+        "Imported style-colours that exist in master data but have zero stock in Local warehouse 101, Local warehouse 501 and Central warehouse.",
+        unavailable,
+    )
+    write_sheet(
+        "Alternativy",
+        "Recommended available alternatives",
+        "Alternatives are ranked by the selected-warehouse availability and similarity of gender, category, silhouette, fit, end use, material and MOC. First preference is another available colour of the same base style.",
+        alternatives,
+    )
+
+    missing = normalize_style_selectors(missing_master_selectors)
+    if missing:
+        missing_df = pd.DataFrame(
+            {
+                "Importovaný požadavek": missing,
+                "Stav": "Nenalezeno v masteru",
+                "Poznámka": "Produkt nebyl v aktuálním masteru nalezen; bez atributů nelze vytvořit relevantní automatické alternativy.",
+            }
+        )
+        write_sheet(
+            "Mimo master",
+            "Imported references not found in master data",
+            "These values could not be matched to the uploaded master data.",
+            missing_df,
+        )
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
 def find_col(df: pd.DataFrame, candidates: Sequence[str], required: bool = True) -> str | None:
     normalized = {str(c).strip().casefold(): c for c in df.columns}
     for candidate in candidates:
@@ -558,55 +1276,62 @@ def apply_filters(
     selected_style_refs: Sequence[object] = (),
 ) -> pd.DataFrame:
     data = add_stock_metrics(data, selected_warehouses)
-    mask = pd.Series(True, index=data.index)
 
-    # Product type and material are independent filters. Material restrictions
-    # are applied below only when one or both material checkboxes are selected.
-    mask &= product_type_mask(data, product_types)
-
-    if genders:
-        mask &= data["Gender"].isin(genders)
-    # A style import is an explicit product selection. When active, it
-    # replaces the generic colour-group filter so that a base style returns
-    # every available colour, while style-colour input returns that exact colour.
+    # XLSX import is an explicit product-selection mode. Its contents take
+    # precedence over every regular offer filter: product type, gender,
+    # material, Top style, colour, MOC ranges, season, end use, silhouette,
+    # fit, C/O and all stock / size-run thresholds. The selected warehouse
+    # choice is still used to calculate the displayed availability, total
+    # quantity per style-colour and sizerun status; it is not used to exclude
+    # an imported product. This makes the imported file the single source of
+    # truth for the resulting offer and also keeps zero-stock imports visible.
     if selected_style_refs:
-        mask &= style_selection_mask(data, selected_style_refs)
-    elif colors:
-        mask &= color_mask(data, colors)
+        filtered = data.loc[style_selection_mask(data, selected_style_refs)].copy()
+    else:
+        mask = pd.Series(True, index=data.index)
 
-    mask &= data["MOC CZK"].between(price_min, price_max, inclusive="both")
-    mask &= data["MOC EUR"].between(price_eur_min, price_eur_max, inclusive="both")
+        # Product type and material are independent filters. Material restrictions
+        # are applied below only when one or both material checkboxes are selected.
+        mask &= product_type_mask(data, product_types)
 
-    if seasons:
-        mask &= data["Season"].isin(seasons)
-    if end_uses:
-        mask &= data["End use"].isin(end_uses)
-    if detail_silhouettes:
-        mask &= data["Detail silhouette"].isin(detail_silhouettes)
-    if fits:
-        mask &= data["Fit"].isin(fits)
-    if co_values:
-        mask &= data["C/O"].isin(co_values)
+        if genders:
+            mask &= data["Gender"].isin(genders)
+        if colors:
+            mask &= color_mask(data, colors)
 
-    if technical_material or cotton_material:
-        material_options = set()
-        if technical_material:
-            material_options.add("Technické")
-        if cotton_material:
-            material_options.add("Bavlna")
-        mask &= data["Materiál"].isin(material_options)
+        mask &= data["MOC CZK"].between(price_min, price_max, inclusive="both")
+        mask &= data["MOC EUR"].between(price_eur_min, price_eur_max, inclusive="both")
 
-    if only_top_styles:
-        mask &= data["Top style"]
+        if seasons:
+            mask &= data["Season"].isin(seasons)
+        if end_uses:
+            mask &= data["End use"].isin(end_uses)
+        if detail_silhouettes:
+            mask &= data["Detail silhouette"].isin(detail_silhouettes)
+        if fits:
+            mask &= data["Fit"].isin(fits)
+        if co_values:
+            mask &= data["C/O"].isin(co_values)
 
-    if only_full_sizerun:
-        mask &= data["_full_sizerun"].eq(True)
+        if technical_material or cotton_material:
+            material_options = set()
+            if technical_material:
+                material_options.add("Technické")
+            if cotton_material:
+                material_options.add("Bavlna")
+            mask &= data["Materiál"].isin(material_options)
 
-    mask &= data["Dostupnost ve vybraných skladech"] >= int(min_total_available)
-    mask &= data["Celkem ks styl/barva"] >= int(min_style_color_qty)
-    mask &= data["Dostupné velikosti styl/barva"] >= int(min_article_sizes)
+        if only_top_styles:
+            mask &= data["Top style"]
 
-    filtered = data[mask].copy()
+        if only_full_sizerun:
+            mask &= data["_full_sizerun"].eq(True)
+
+        mask &= data["Dostupnost ve vybraných skladech"] >= int(min_total_available)
+        mask &= data["Celkem ks styl/barva"] >= int(min_style_color_qty)
+        mask &= data["Dostupné velikosti styl/barva"] >= int(min_article_sizes)
+
+        filtered = data[mask].copy()
     if filtered.empty:
         return filtered
 
