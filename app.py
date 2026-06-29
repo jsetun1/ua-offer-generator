@@ -1,17 +1,19 @@
-"""UA Offer Generator - Streamlit app."""
+"""UA Offer Generator – Streamlit app."""
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from offer_core import (
     ALTERNATIVE_ENGINE_VERSION,
+    add_selected_alternatives_to_offer,
     apply_filters,
     build_dataset,
+    imported_unavailable_with_alternatives,
     read_excel,
     read_style_selectors_excel,
-    imported_unavailable_with_alternatives,
-    add_selected_alternatives_to_offer,
+    to_english_display,
     to_offer_table,
     unique_sorted,
     unmatched_style_selectors,
@@ -25,7 +27,7 @@ APP_TITLE = "UA Offer Generator"
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
-    st.caption("Generate Under Armour offers from master data and warehouse files.")
+    st.caption("Generate Under Armour product offers from master data and warehouse files.")
 
     with st.sidebar:
         st.header("1. Upload files")
@@ -33,7 +35,7 @@ def main() -> None:
             "Master data",
             type=["xlsx"],
             help=(
-                "Must include EAN, Artikl, size, name, MOC CZK, MOC EUR and Composition. "
+                "Must include EAN, Artikl / Article, size, product name, RRP CZK, RRP EUR and Composition. "
                 "For the Top style filter, use a Top style / Top styles column and mark any row of the base style with x."
             ),
         )
@@ -71,8 +73,8 @@ def main() -> None:
     gender_options = unique_sorted(data, "Gender")
     detail_silhouette_options = unique_sorted(data, "Detail silhouette")
     fit_options = unique_sorted(data, "Fit")
-    moc_eur_max_default = int(max(float(data["MOC EUR"].max()), 999))
-    moc_czk_max_default = int(max(float(data["MOC CZK"].max()), 999))
+    rrp_eur_max_default = int(max(float(data["MOC EUR"].max()), 999))
+    rrp_czk_max_default = int(max(float(data["MOC CZK"].max()), 999))
 
     with col1:
         product_types = st.multiselect(
@@ -87,8 +89,8 @@ def main() -> None:
         )
 
         st.markdown("**Material**")
-        technical_material = st.checkbox("Technické", value=False)
-        cotton_material = st.checkbox("Bavlna", value=False)
+        performance_material = st.checkbox("Polyester & performance fibres", value=False)
+        cotton_material = st.checkbox("Cotton", value=False)
         only_top_styles = st.checkbox("Only Top styles", value=False)
 
     with col2:
@@ -97,18 +99,18 @@ def main() -> None:
             ["Black", "Dark Blue", "Blue", "Gray", "White", "Red", "Green", "Orange", "Yellow", "Brown"],
             default=["Black", "Dark Blue"],
         )
-        price_min = st.number_input("MOC CZK from", min_value=0, value=0, step=100)
+        price_min = st.number_input("RRP CZK from", min_value=0, value=0, step=100)
         price_max = st.number_input(
-            "MOC CZK to",
+            "RRP CZK to",
             min_value=0,
-            value=min(999, moc_czk_max_default),
+            value=min(999, rrp_czk_max_default),
             step=100,
         )
-        price_eur_min = st.number_input("MOC EUR from", min_value=0, value=0, step=5)
+        price_eur_min = st.number_input("RRP EUR from", min_value=0, value=0, step=5)
         price_eur_max = st.number_input(
-            "MOC EUR to",
+            "RRP EUR to",
             min_value=0,
-            value=moc_eur_max_default,
+            value=rrp_eur_max_default,
             step=5,
         )
 
@@ -125,7 +127,7 @@ def main() -> None:
             step=1,
         )
         min_style_color_qty = st.number_input(
-            "Minimum total pieces per style / colour",
+            "Minimum total units per style / colour",
             min_value=0,
             value=1,
             step=1,
@@ -141,20 +143,20 @@ def main() -> None:
             step=1,
         )
         only_full_sizerun = st.checkbox(
-            "Only full sizerun",
+            "Only full size run",
             value=False,
             help="Mens: S–2XL. Womens: XS–XL. Every core size must have stock in the selected warehouses.",
         )
 
     with col4:
         style_import_file = st.file_uploader(
-            "Import stylů / stylů-barvy (XLSX)",
+            "Import styles / style-colours (XLSX)",
             type=["xlsx"],
             help=(
-                "V prvním listu vložte styly do buněk pod sebe. Hodnota 1326799 vybere všechny "
-                "barvy stylu; 1326799-036 (případně 1326799/036) vybere pouze konkrétní styl/barvu. "
-                "Při importu mají zadané styly přednost před všemi standardními filtry; vybraný sklad "
-                "slouží pouze pro výpočet a zobrazení dostupnosti."
+                "On the first worksheet, enter styles in cells below one another. A value such as 1326799 selects all "
+                "available colours of that style; 1326799-036 (or 1326799/036) selects one exact style / colour. "
+                "When an import is used, imported values override all standard filters. Selected warehouses are used only "
+                "to calculate and display availability."
             ),
             key="style_import_file",
         )
@@ -182,169 +184,163 @@ def main() -> None:
 
         if not selected_style_refs:
             st.warning(
-                "No valid styles found in the imported file. Use values such as 1326799 or 1326799-036."
+                "No valid styles were found in the imported file. Use values such as 1326799 or 1326799-036."
             )
             st.stop()
-        else:
-            unmatched = unmatched_style_selectors(data, selected_style_refs)
-            alternative_strategy_label = st.radio(
-                "Strategie doporučených alternativ",
-                options=[
-                    "Obě varianty",
-                    "Stejný styl – jiná barva",
-                    "Stejná barva – jiný styl",
-                ],
-                index=0,
-                help=(
-                    "Stejný styl zachová střih a obvykle i cenu, ale nabídne jinou dostupnou barvu. "
-                    "Stejná barva hledá jiný dostupný styl, například jiné pánské šedé golfové polo. "
-                    "Volba Obě varianty zobrazí vyvážený mix obou cest."
-                ),
-            )
-            alternative_strategy = {
-                "Obě varianty": "both",
-                "Stejný styl – jiná barva": "same_style",
-                "Stejná barva – jiný styl": "same_color_new_style",
-            }[alternative_strategy_label]
-            alternative_count = st.selectbox(
-                "Počet automaticky navržených alternativ",
-                options=[3, 5, 8],
-                index=1,
-                help=(
-                    "Alternativy se hledají pouze mezi produkty dostupnými ve skladech, "
-                    "které jsou zvolené v poli Availability source used for filtering. U volby "
-                    "Obě varianty se počet rozdělí mezi obě cesty; nevyužitá místa doplní druhá cesta."
-                ),
-            )
-            unavailable_import_df, alternatives_df = imported_unavailable_with_alternatives(
-                data=data,
-                style_selectors=selected_style_refs,
-                selected_warehouses=selected_warehouses,
-                max_alternatives=int(alternative_count),
-                alternative_strategy=alternative_strategy,
-            )
-            st.success(
-                f"Import mode is active: {len(selected_style_refs)} unique selection(s) loaded. "
-                "The import overrides every standard offer filter. Base styles include all colours; "
-                "exact style-colour values include only that colour. Selected warehouses are used only "
-                "to calculate and display availability, not to remove imported products."
-            )
 
-            if not unavailable_import_df.empty:
-                st.warning(
-                    f"{len(unavailable_import_df)} imported style / colour item(s) exist in master data "
-                    "but have zero stock across all uploaded warehouses."
-                )
-                with st.expander("Nedostupné položky z importu a doporučené alternativy", expanded=False):
-                    st.caption(
-                        f"Alternativy v{ALTERNATIVE_ENGINE_VERSION.replace('v', '')}: přesně nedostupný artikl "
-                        "je vždy vyloučen. Podle zvolené strategie aplikace buď nabídne stejný styl v jiné "
-                        "dostupné barvě, nebo jiný dostupný styl ve stejné barvě. U jiného stylu nejprve drží "
-                        "typ produktu (např. Polo), pohlaví, division, použití a střih; poté řadí fit, materiál, "
-                        "segment, MOC a zásobu. Dostupnost alternativ odpovídá aktuálně vybraným skladům."
-                    )
-                    st.subheader("Nedostupné z importu")
-                    st.dataframe(unavailable_import_df, use_container_width=True, hide_index=True)
-                    st.subheader("Doporučené alternativy")
-                    if alternatives_df.empty:
-                        st.info("Pro tyto položky nebyla ve vybraných skladech nalezena vhodná dostupná alternativa.")
-                    else:
-                        st.dataframe(alternatives_df, use_container_width=True, hide_index=True)
+        unmatched = unmatched_style_selectors(data, selected_style_refs)
+        alternative_strategy_label = st.radio(
+            "Alternative recommendation strategy",
+            options=[
+                "Both approaches",
+                "Same style – another colour",
+                "Same colour – different style",
+            ],
+            index=0,
+            help=(
+                "Same style retains the cut and usually the price, but offers a different available colour. "
+                "Same colour looks for another available style, for example another mens gray golf polo. "
+                "Both approaches shows a balanced mix of both routes."
+            ),
+        )
+        alternative_strategy = {
+            "Both approaches": "both",
+            "Same style – another colour": "same_style",
+            "Same colour – different style": "same_color_new_style",
+        }[alternative_strategy_label]
+        alternative_count = st.selectbox(
+            "Number of automatic alternatives",
+            options=[3, 5, 8],
+            index=1,
+            help=(
+                "Alternatives are searched only among products available in the warehouses selected in "
+                "Availability source used for filtering. With Both approaches, the requested count is split between "
+                "the two routes; unused places are filled by the other route."
+            ),
+        )
+        unavailable_import_df, alternatives_df = imported_unavailable_with_alternatives(
+            data=data,
+            style_selectors=selected_style_refs,
+            selected_warehouses=selected_warehouses,
+            max_alternatives=int(alternative_count),
+            alternative_strategy=alternative_strategy,
+        )
+        st.success(
+            f"Import mode is active: {len(selected_style_refs)} unique selection(s) loaded. "
+            "The import overrides every standard offer filter. Base styles include all colours; "
+            "exact style-colour values include only that colour. Selected warehouses are used only "
+            "to calculate and display availability, not to remove imported products."
+        )
 
-            if not alternatives_df.empty:
-                st.subheader("Vyber alternativy pro finální nabídku")
+        if not unavailable_import_df.empty:
+            st.warning(
+                f"{len(unavailable_import_df)} imported style / colour item(s) exist in master data "
+                "but have zero stock across all uploaded warehouses."
+            )
+            with st.expander("Unavailable imported products and recommended alternatives", expanded=False):
                 st.caption(
-                    "Zaškrtněte produkty, které mají být přidány do finální nabídky. U každé nedostupné položky "
-                    "zpravidla vyberte jednu preferovanou náhradu; lze vybrat i více variant. Každý vybraný produkt "
-                    "se přidá se všemi dostupnými EAN/velikostmi a aktuální zásobou ve zvolených skladech."
+                    f"Alternatives {ALTERNATIVE_ENGINE_VERSION}: the exact unavailable style / colour is always excluded. "
+                    "Depending on the selected strategy, the app offers either the same style in another available colour, "
+                    "or another available style in the same colour. For a different style, it prioritises product family "
+                    "(for example, Polo), gender, division, end use and silhouette; then it ranks fit, material, segment, "
+                    "RRP and stock. Alternative availability reflects the currently selected warehouses."
                 )
-                selection_columns = [
-                    "Importovaný požadavek",
-                    "Nedostupný artikl",
-                    "Nedostupný název",
-                    "Alternativa – artikl",
-                    "Alternativa – název",
-                    "Typ alternativy",
-                    "MOC CZK",
-                    "MOC EUR",
-                    "Dostupnost ve vybraných skladech",
-                    "Dostupné velikosti ve vybraných skladech",
-                    "Důvod doporučení",
-                ]
-                selection_table = alternatives_df.loc[:, selection_columns].copy()
-                selection_table.insert(0, "Přidat do nabídky", False)
-                selection_signature = "|".join(
-                    alternatives_df[["Nedostupný artikl", "Alternativa – artikl"]]
-                    .fillna("")
-                    .astype(str)
-                    .agg("→".join, axis=1)
-                    .tolist()
-                )
-                if st.session_state.get("alternative_selection_signature_v12") != selection_signature:
-                    st.session_state["alternative_selection_signature_v12"] = selection_signature
-                    st.session_state.pop("alternative_offer_selection_v12", None)
-                edited_selection = st.data_editor(
-                    selection_table,
-                    key="alternative_offer_selection_v12",
-                    hide_index=True,
-                    use_container_width=True,
-                    height=min(520, max(180, 42 * (len(selection_table) + 1))),
-                    disabled=[column for column in selection_table.columns if column != "Přidat do nabídky"],
-                    column_config={
-                        "Přidat do nabídky": st.column_config.CheckboxColumn(
-                            "Přidat do nabídky",
-                            help="Vybraný produkt bude součástí finálního XLSX exportu.",
-                            default=False,
-                        ),
-                    },
-                )
-                selected_alternatives_df = edited_selection.loc[
-                    edited_selection["Přidat do nabídky"].fillna(False).astype(bool)
-                ].copy()
-                if not selected_alternatives_df.empty:
-                    replacement_mode_label = st.radio(
-                        "Jak pracovat s původní nedostupnou položkou ve finálním exportu",
-                        options=[
-                            "Nahradit ji vybranou alternativou",
-                            "Ponechat ji v nabídce i s nulovou zásobou",
-                        ],
-                        index=0,
-                        horizontal=True,
-                        help=(
-                            "První volba odebere pouze konkrétní nedostupný artikl, pro který jste vybrali "
-                            "alternativu. Ostatní importované položky zůstávají beze změny."
-                        ),
-                    )
-                    replacement_mode = (
-                        "replace_selected"
-                        if replacement_mode_label == "Nahradit ji vybranou alternativou"
-                        else "keep_original"
-                    )
-                    st.info(
-                        f"Do finální nabídky bude přidáno {selected_alternatives_df['Alternativa – artikl'].nunique()} "
-                        "unikátních alternativních stylů / barev."
-                    )
+                st.subheader("Unavailable imports")
+                st.dataframe(to_english_display(unavailable_import_df), use_container_width=True, hide_index=True)
+                st.subheader("Recommended alternatives")
+                if alternatives_df.empty:
+                    st.info("No suitable available alternative was found in the selected warehouses.")
+                else:
+                    st.dataframe(to_english_display(alternatives_df), use_container_width=True, hide_index=True)
 
-            if unmatched:
-                preview_unmatched = ", ".join(unmatched[:12])
-                suffix = " …" if len(unmatched) > 12 else ""
-                st.warning(f"Not found in master data: {preview_unmatched}{suffix}")
+        if not alternatives_df.empty:
+            st.subheader("Select alternatives for the final offer")
+            st.caption(
+                "Tick the products to include in the final offer. The original unavailable RRP is shown beside each option "
+                "so you can compare it directly with the alternative RRP. Normally select one preferred replacement per "
+                "unavailable item, although multiple alternatives may be selected. Each selected product is included with all "
+                "of its EANs, sizes and current availability in the selected warehouses."
+            )
+            selection_signature = "|".join(
+                alternatives_df[["Nedostupný artikl", "Alternativa – artikl"]]
+                .fillna("")
+                .astype(str)
+                .agg("→".join, axis=1)
+                .tolist()
+            )
+            if st.session_state.get("alternative_selection_signature_v13") != selection_signature:
+                st.session_state["alternative_selection_signature_v13"] = selection_signature
+                st.session_state.pop("alternative_offer_selection_v13", None)
 
-            if not unavailable_import_df.empty or unmatched:
-                substitution_bytes = write_import_substitution_excel(
-                    unavailable_import_df,
-                    alternatives_df,
-                    unmatched,
-                )
-                st.download_button(
-                    label="Download nedostupných produktů a alternativ",
-                    data=substitution_bytes,
-                    file_name="ua_import_nedostupne_a_alternativy.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            selection_table = st.data_editor(
+                # A dedicated display table keeps all working columns in the core logic unchanged.
+                # Its index matches alternatives_df and is used below to recover selected core rows.
+                _build_alternative_selection_table(alternatives_df),
+                key="alternative_offer_selection_v13",
+                hide_index=True,
+                use_container_width=True,
+                height=min(520, max(180, 42 * (len(alternatives_df) + 1))),
+                disabled=[
+                    "Imported request", "Unavailable style / colour", "Unavailable product",
+                    "Original RRP CZK", "Original RRP EUR", "Alternative style / colour",
+                    "Alternative product", "Alternative type", "Alternative RRP CZK", "Alternative RRP EUR",
+                    "Selected warehouse availability", "Available sizes in selected warehouses",
+                    "Recommendation reason",
+                ],
+                column_config={
+                    "Add to offer": st.column_config.CheckboxColumn(
+                        "Add to offer",
+                        help="The selected product will be included in the final XLSX export.",
+                        default=False,
+                    ),
+                },
+            )
+            selected_indices = selection_table.index[
+                selection_table["Add to offer"].fillna(False).astype(bool)
+            ]
+            selected_alternatives_df = alternatives_df.loc[selected_indices].copy()
+            if not selected_alternatives_df.empty:
+                replacement_mode_label = st.radio(
+                    "How should the original unavailable product be handled in the final export?",
+                    options=[
+                        "Replace it with the selected alternative",
+                        "Keep it in the offer with zero stock",
+                    ],
+                    index=0,
+                    horizontal=True,
                     help=(
-                        "Soubor obsahuje list Nedostupné z importu, list Alternativy a případně list Mimo master."
+                        "The first option removes only the exact unavailable style / colour for which you selected "
+                        "an alternative. Other imported products remain unchanged."
                     ),
                 )
+                replacement_mode = (
+                    "replace_selected"
+                    if replacement_mode_label == "Replace it with the selected alternative"
+                    else "keep_original"
+                )
+                st.info(
+                    f"{selected_alternatives_df['Alternativa – artikl'].nunique()} unique alternative "
+                    "style / colour item(s) will be included in the final offer."
+                )
+
+        if unmatched:
+            preview_unmatched = ", ".join(unmatched[:12])
+            suffix = " …" if len(unmatched) > 12 else ""
+            st.warning(f"Not found in master data: {preview_unmatched}{suffix}")
+
+        if not unavailable_import_df.empty or unmatched:
+            substitution_bytes = write_import_substitution_excel(
+                unavailable_import_df,
+                alternatives_df,
+                unmatched,
+            )
+            st.download_button(
+                label="Download unavailable products and alternatives",
+                data=substitution_bytes,
+                file_name="ua_import_unavailable_and_alternatives.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="The file contains Unavailable imports, Alternatives and, if applicable, Not in master data.",
+            )
 
     filtered = apply_filters(
         data=data,
@@ -364,7 +360,7 @@ def main() -> None:
         detail_silhouettes=detail_silhouettes,
         fits=fits,
         co_values=co_values,
-        technical_material=technical_material,
+        technical_material=performance_material,
         cotton_material=cotton_material,
         only_top_styles=only_top_styles,
         only_full_sizerun=only_full_sizerun,
@@ -381,7 +377,7 @@ def main() -> None:
             replace_selected_unavailable=replacement_mode == "replace_selected",
         )
 
-    # Preview remains neutral: it shows both MOC currencies and does not yet
+    # Preview remains neutral: it shows both RRP currencies and does not yet
     # add a negotiated discount. Final currency and discount are chosen below.
     preview_df = to_offer_table(
         offer_rows,
@@ -392,71 +388,69 @@ def main() -> None:
 
     st.header("3. Preview")
     full_sizerun_count = (
-        offer_rows.loc[offer_rows["Plný sizerun"].eq("Ano"), "Artikl"].nunique()
+        offer_rows.loc[offer_rows["Plný sizerun"].eq("Yes"), "Artikl"].nunique()
         if not offer_rows.empty
         else 0
     )
     kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
     kpi1.metric("EAN rows", f"{len(preview_df):,}")
-    kpi2.metric("Style / colour", f"{preview_df['Artikl'].nunique() if not preview_df.empty else 0:,}")
+    kpi2.metric("Style / colour", f"{preview_df['Style / colour'].nunique() if not preview_df.empty else 0:,}")
     kpi3.metric(
         "Selected availability",
         f"{int(offer_rows['Dostupnost ve vybraných skladech'].sum()) if not offer_rows.empty else 0:,}",
     )
-    kpi4.metric("Full sizeruns", f"{full_sizerun_count:,}")
+    kpi4.metric("Full size runs", f"{full_sizerun_count:,}")
     kpi5.metric(
-        "Average MOC CZK",
+        "Average RRP CZK",
         f"{offer_rows['MOC CZK'].mean():,.0f}" if not offer_rows.empty else "-",
     )
     kpi6.metric(
-        "Average MOC EUR",
+        "Average RRP EUR",
         f"{offer_rows['MOC EUR'].mean():,.0f}" if not offer_rows.empty else "-",
     )
 
     st.dataframe(preview_df.head(500), use_container_width=True, hide_index=True)
     if len(preview_df) > 500:
-        st.caption("Preview shows first 500 rows only. Export contains all selected offer rows.")
+        st.caption("Preview shows the first 500 rows only. The export contains all selected offer rows.")
 
     st.header("4. Final pricing and export")
     export_col1, export_col2, export_col3 = st.columns([1, 1, 1])
     with export_col1:
         discount_percent = st.number_input(
-            "Sleva z MOC včetně DPH (%)",
+            "Discount from VAT-inclusive RRP (%)",
             min_value=0.0,
             max_value=100.0,
             value=0.0,
             step=0.5,
             format="%.1f",
-            help=(
-                "Sleva se propíše až do finální nabídky a nemění seznam vyfiltrovaných produktů."
-            ),
+            help="The discount is applied only in the final offer and does not change the selected product list.",
         )
     with export_col2:
         export_currency = st.radio(
-            "Měna ve finálním exportu",
+            "Currency in final export",
             options=["CZK", "EUR", "CZK + EUR"],
             index=2,
             horizontal=True,
-            help="Vyberte, zda má export obsahovat ceny v CZK, EUR, nebo obou měnách.",
+            help="Choose whether the export should contain prices in CZK, EUR or both currencies.",
         )
     with export_col3:
         price_vat_mode = st.radio(
-            "Cena po slevě v exportu",
-            options=["Bez DPH", "S DPH"],
+            "Final discounted price",
+            options=["Excl. VAT", "Incl. VAT"],
             index=0,
             horizontal=True,
-            help="Volí, zda se výsledná nabídková cena po slevě zobrazí bez DPH nebo včetně DPH.",
+            help="Choose whether the final discounted price is shown excluding or including VAT.",
         )
 
-    if price_vat_mode == "S DPH":
+    if price_vat_mode == "Incl. VAT":
         st.caption(
-            "Nabídková cena s DPH = MOC × (1 − sleva). "
-            "DPH je 21 % a MOC se již bere včetně DPH. Příklad: 999 CZK při slevě 40 % = 599,40 CZK s DPH."
+            "Offer price incl. VAT = RRP × (1 − discount). VAT is 21% and the RRP is already VAT-inclusive. "
+            "Example: 999 CZK at a 40% discount = 599.40 CZK incl. VAT."
         )
     else:
         st.caption(
-            "Nabídková cena bez DPH = MOC × (1 − sleva) / 1,21. "
-            "DPH je pevně 21 %. Příklad: 999 CZK při slevě 40 % = 495,37 CZK bez DPH."
+            "Offer price excl. VAT = RRP × (1 − discount) / 1.21. VAT is fixed at 21%. "
+            "Example: 999 CZK at a 40% discount = 495.37 CZK excl. VAT."
         )
 
     final_offer_df = to_offer_table(
@@ -468,12 +462,12 @@ def main() -> None:
         price_vat_mode=price_vat_mode,
     )
 
-    file_name = st.text_input("Output filename", value="ua_offer.xlsx")
+    file_name = st.text_input("Output file name", value="ua_offer.xlsx")
     if not file_name.lower().endswith(".xlsx"):
         file_name += ".xlsx"
 
     if final_offer_df.empty:
-        st.warning("No products match the current filters.")
+        st.warning("No products match the current criteria.")
     else:
         excel_bytes = write_offer_excel(
             final_offer_df,
@@ -496,49 +490,70 @@ def main() -> None:
             Values `x`, `ano`, `yes`, `true` or `1` are accepted. A marker in any
             EAN row makes the entire base style a Top style across all colours and sizes.
 
-            **Technické / Bavlna**: a row containing `cotton` or `bavlna` in
-            `Composition` is Bavlna. Other compositions containing common performance
-            fibres such as polyester, elastane, nylon or polyamide are Technické.
+            **Polyester & performance fibres / Cotton**: a row containing `cotton` or `bavlna` in
+            `Composition` is Cotton. Polyester & performance fibres means a composition without cotton
+            that contains common performance fibres such as polyester, elastane, nylon or polyamide.
             Both selected includes both groups; neither selected leaves material unrestricted.
-            The product type **Technical T-shirts** now defines only the product category,
-            not the material.
+            The product type **Technical T-shirts** defines only the product category, not the material.
 
-            **Celkem ks styl/barva**: total stock across all EAN rows sharing `Artikl`
-            (UA style + colour), calculated from the currently selected warehouses.
-            It is shown in every export.
+            **Total units / style-colour**: total stock across all EAN rows sharing `Artikl`
+            (UA style + colour), calculated from the currently selected warehouses. It is shown in every export.
 
-            **Full sizerun**: Mens requires S, M, L, XL and 2XL; Womens requires
-            XS, S, M, L and XL. Each of those sizes must have stock in the selected
-            warehouses. UA size labels SM / MD / LG and XXL are converted automatically.
+            **Full size run**: Mens requires S, M, L, XL and 2XL; Womens requires XS, S, M, L and XL.
+            Each of those sizes must have stock in the selected warehouses. UA size labels SM / MD / LG and XXL
+            are converted automatically.
 
-            **Style import (XLSX)**: insert styles in cells under one another in the first
-            worksheet. `1326799` returns all colours of the base style; `1326799-036`
-            (or `1326799/036`) returns only that exact style/colour. **Import mode has precedence over
-            all regular offer filters**: product type, gender, material, Top styles, colour, MOC ranges,
-            season, end use, silhouette, fit, C/O, minimum availability, minimum style/colour stock,
-            minimum number of sizes and Full sizerun. Warehouse selection remains active only for calculating
-            and displaying availability; it does not remove imported products from the result.
-            If imported products are present in the master but have **zero stock in all three uploaded warehouses**,
-            an immediate list and download appear below the import. The file contains the unavailable imported products,
-            ranked available alternatives, and a separate sheet for valid imported values not found in master data.
-            Alternatives use the warehouses selected for the current offer. The **exact unavailable style/colour** is always
-            excluded, but a different available colourway of the same style is a valid option when the customer wants to keep
-            the fit and price. The alternative strategy lets you choose between **same style / another colour**, **same colour /
-            another style**, or a balanced mix. **Selected alternatives** can be checked directly in the app and flow into
-            the preview and final XLSX report with their current EANs, available sizes and warehouse availability. You can choose
-            whether a checked alternative replaces its exact zero-stock import or is added alongside it. When another style is requested and a product type can be recognized from the
-            name (for example, **Polo**), it is preserved first. The app then prioritizes colour, gender, division, end use and
-            cut; fit, material, segment and MOC determine the order among usable matches.
+            **Style import (XLSX)**: insert styles in cells below one another in the first worksheet.
+            `1326799` returns all colours of the base style; `1326799-036` (or `1326799/036`) returns only that
+            exact style / colour. **Import mode takes precedence over all regular offer filters**: product type,
+            gender, material, Top styles, colour, RRP ranges, season, end use, silhouette, fit, C/O, minimum
+            availability, minimum style/colour stock, minimum number of sizes and Full size run. Warehouse selection
+            remains active only for calculating and displaying availability; it does not remove imported products
+            from the result. If imported products are present in the master but have **zero stock in all three uploaded
+            warehouses**, an immediate list and a download appear below the import. The file contains unavailable imported
+            products, ranked available alternatives and a separate sheet for valid imported values not found in master data.
+            Alternatives use the warehouses selected for the current offer. The **exact unavailable style / colour** is
+            always excluded, but a different available colourway of the same style is valid when the customer wants to
+            preserve fit and RRP. The alternative strategy lets you choose between **same style / another colour**,
+            **same colour / different style**, or a balanced mix. **Selected alternatives** can be checked directly
+            in the app and flow into the preview and final XLSX report with their current EANs, available sizes and warehouse
+            availability. You can choose whether a checked alternative replaces its exact zero-stock import or is added
+            alongside it. When a different style is requested and a product family can be recognized from the name
+            (for example, **Polo**), it is preserved first. The app then prioritises colour, gender, division, end use
+            and silhouette; fit, material, segment and RRP determine the order among usable matches.
 
-            **Final discount, currency and VAT mode**: choose CZK, EUR or both currencies,
-            then whether the final discounted price is **Bez DPH** or **S DPH**. The first
-            variant is `MOC × (1 − discount) / 1.21`; the second is `MOC × (1 − discount)`.
-            VAT is fixed at 21 %.
+            **Final discount, currency and VAT mode**: choose CZK, EUR or both currencies, then whether the final
+            discounted price is **Excl. VAT** or **Incl. VAT**. The first variant is `RRP × (1 − discount) / 1.21`;
+            the second is `RRP × (1 − discount)`. VAT is fixed at 21%.
 
-            **Central warehouse** = sum of the first two `Week` columns in the central
-            warehouse file.
+            **Central warehouse** = sum of the first two `Week` columns in the central warehouse file.
             """
         )
+
+
+def _build_alternative_selection_table(alternatives_df):
+    """Build the editable, English table used to select final-offer alternatives."""
+    # Retain the original index. It links checked UI rows back to the internal
+    # alternative records used by add_selected_alternatives_to_offer().
+    return pd.DataFrame(
+        {
+            "Add to offer": False,
+            "Imported request": alternatives_df["Importovaný požadavek"],
+            "Unavailable style / colour": alternatives_df["Nedostupný artikl"],
+            "Unavailable product": alternatives_df["Nedostupný název"],
+            "Original RRP CZK": alternatives_df["MOC nedostupného CZK"],
+            "Original RRP EUR": alternatives_df["MOC nedostupného EUR"],
+            "Alternative style / colour": alternatives_df["Alternativa – artikl"],
+            "Alternative product": alternatives_df["Alternativa – název"],
+            "Alternative type": alternatives_df["Typ alternativy"],
+            "Alternative RRP CZK": alternatives_df["MOC CZK"],
+            "Alternative RRP EUR": alternatives_df["MOC EUR"],
+            "Selected warehouse availability": alternatives_df["Dostupnost ve vybraných skladech"],
+            "Available sizes in selected warehouses": alternatives_df["Dostupné velikosti ve vybraných skladech"],
+            "Recommendation reason": alternatives_df["Důvod doporučení"],
+        },
+        index=alternatives_df.index,
+    )
 
 
 if __name__ == "__main__":
