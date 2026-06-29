@@ -6,14 +6,18 @@ does not depend on a separate offer_core.py file.
 
 """Core logic for UA Offer Generator."""
 
+import base64
+import hashlib
 import io
 import re
 from datetime import datetime
-from typing import Sequence
+from typing import Mapping, Sequence
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image as ExcelImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -1858,6 +1862,263 @@ def to_offer_table(
                 offer[DISPLAY_COLUMN_LABELS.get(col, col)] = filtered[col]
     return offer
 
+def _normalise_image_article(value: object) -> str:
+    """Return the filename-ready style / colour key used by the image folder."""
+    if value is None or pd.isna(value):
+        return ""
+    return (
+        str(value)
+        .strip()
+        .upper()
+        .replace("–", "-")
+        .replace("—", "-")
+        .replace("−", "-")
+        .replace(" ", "")
+    )
+
+
+def _onedrive_images_config() -> dict[str, str]:
+    """Read OneDrive / SharePoint credentials from Streamlit secrets.
+
+    The app deliberately keeps credentials out of GitHub. See
+    ``secrets.example.toml`` in the update package for the required values.
+    """
+    try:
+        raw = st.secrets.get("onedrive_images", {})
+    except Exception:
+        raw = {}
+
+    def get_value(key: str) -> str:
+        try:
+            value = raw.get(key, "")
+        except AttributeError:
+            value = ""
+        return str(value or "").strip()
+
+    return {
+        "tenant_id": get_value("tenant_id"),
+        "client_id": get_value("client_id"),
+        "client_secret": get_value("client_secret"),
+        "folder_share_url": get_value("folder_share_url"),
+    }
+
+
+def _onedrive_config_errors(config: Mapping[str, str]) -> list[str]:
+    labels = {
+        "tenant_id": "tenant_id",
+        "client_id": "client_id",
+        "client_secret": "client_secret",
+        "folder_share_url": "folder_share_url",
+    }
+    return [labels[key] for key in labels if not str(config.get(key, "")).strip()]
+
+
+def _graph_share_token(folder_share_url: str) -> str:
+    """Encode a SharePoint sharing URL in the format required by Graph."""
+    encoded = base64.urlsafe_b64encode(folder_share_url.encode("utf-8")).decode("ascii")
+    return "u!" + encoded.rstrip("=")
+
+
+def _graph_access_token(config: Mapping[str, str]) -> str:
+    """Get a Microsoft Graph app-only access token without persisting it."""
+    import requests
+
+    token_url = (
+        "https://login.microsoftonline.com/"
+        f"{quote(str(config['tenant_id']), safe='')}/oauth2/v2.0/token"
+    )
+    response = requests.post(
+        token_url,
+        data={
+            "client_id": config["client_id"],
+            "client_secret": config["client_secret"],
+            "scope": "https://graph.microsoft.com/.default",
+            "grant_type": "client_credentials",
+        },
+        timeout=30,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            "Microsoft Entra token request failed "
+            f"(HTTP {response.status_code}). Check tenant ID, client ID, client secret and Graph consent."
+        )
+    token = response.json().get("access_token", "")
+    if not token:
+        raise RuntimeError("Microsoft Entra returned no access token.")
+    return str(token)
+
+
+def _resolve_graph_folder(config: Mapping[str, str], access_token: str) -> tuple[str, str]:
+    """Resolve a shared OneDrive / SharePoint folder to drive and item IDs."""
+    import requests
+
+    share_token = _graph_share_token(config["folder_share_url"])
+    response = requests.get(
+        f"https://graph.microsoft.com/v1.0/shares/{share_token}/driveItem",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Prefer": "redeemSharingLinkIfNecessary",
+        },
+        timeout=30,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            "Microsoft Graph could not access the configured image folder "
+            f"(HTTP {response.status_code}). Confirm that the app has permission to the folder."
+        )
+
+    item = response.json()
+    if "folder" not in item:
+        raise RuntimeError("The configured SharePoint link must point to a folder, not to a single file.")
+    folder_id = str(item.get("id", "")).strip()
+    drive_id = str(item.get("parentReference", {}).get("driveId", "")).strip()
+    if not folder_id or not drive_id:
+        raise RuntimeError("Microsoft Graph did not return the drive and folder IDs for the shared image folder.")
+    return drive_id, folder_id
+
+
+def download_onedrive_product_images(
+    article_codes: Sequence[object],
+    config: Mapping[str, str],
+) -> tuple[dict[str, bytes], list[str], list[str]]:
+    """Download only the requested ``<style-colour>.jpg`` files from OneDrive.
+
+    Returns a mapping keyed by normalised style / colour, a list of missing JPGs
+    and a list of non-fatal per-file download errors. A connection or folder
+    failure raises a clear runtime error because the workbook would otherwise
+    misleadingly look complete while every image is absent.
+    """
+    import requests
+
+    articles: list[str] = []
+    seen: set[str] = set()
+    for value in article_codes:
+        article = _normalise_image_article(value)
+        if article and article not in seen:
+            articles.append(article)
+            seen.add(article)
+
+    if not articles:
+        return {}, [], []
+
+    access_token = _graph_access_token(config)
+    drive_id, folder_id = _resolve_graph_folder(config, access_token)
+    headers = {"Authorization": f"Bearer {access_token}"}
+    images: dict[str, bytes] = {}
+    missing: list[str] = []
+    errors: list[str] = []
+
+    for article in articles:
+        filename = f"{article}.jpg"
+        # Files are flat in the supplied `All resized / Uprava` folder and are
+        # named exactly by the article code, for example 6006717-001.jpg.
+        endpoint = (
+            "https://graph.microsoft.com/v1.0/drives/"
+            f"{quote(drive_id, safe='')}/items/{quote(folder_id, safe='')}:"
+            f"/{quote(filename, safe='')}:/content"
+        )
+        response = requests.get(endpoint, headers=headers, timeout=45, allow_redirects=True)
+        if response.status_code == 404:
+            missing.append(article)
+            continue
+        if not response.ok:
+            errors.append(f"{article} (HTTP {response.status_code})")
+            continue
+        image_bytes = response.content
+        if not image_bytes:
+            missing.append(article)
+            continue
+        images[article] = image_bytes
+
+    return images, missing, errors
+
+
+def _fit_excel_image(image_bytes: bytes, max_width_px: int, max_height_px: int) -> ExcelImage | None:
+    """Return a proportionally scaled openpyxl image, or None for invalid data."""
+    try:
+        image = ExcelImage(io.BytesIO(image_bytes))
+        width = max(int(image.width), 1)
+        height = max(int(image.height), 1)
+        scale = min(max_width_px / width, max_height_px / height, 1.0)
+        image.width = max(1, int(round(width * scale)))
+        image.height = max(1, int(round(height * scale)))
+        return image
+    except Exception:
+        return None
+
+
+def _add_product_images_to_offer_sheet(
+    ws,
+    offer_df: pd.DataFrame,
+    start_row: int,
+    image_column: int,
+    image_bytes_by_article: Mapping[str, bytes],
+    header_fill,
+    header_font,
+    border,
+) -> tuple[int, int]:
+    """Append one merged image field for each contiguous style / colour block."""
+    header = ws.cell(row=start_row, column=image_column, value="Product image")
+    header.fill = header_fill
+    header.font = header_font
+    header.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    header.border = border
+    ws.column_dimensions[get_column_letter(image_column)].width = 26
+
+    if offer_df.empty or "Style / colour" not in offer_df.columns:
+        return 0, 0
+
+    article_values = offer_df["Style / colour"].map(_normalise_image_article).tolist()
+    groups: list[tuple[int, int, str]] = []
+    group_start = 0
+    for pos in range(1, len(article_values) + 1):
+        if pos == len(article_values) or article_values[pos] != article_values[group_start]:
+            groups.append((group_start, pos - 1, article_values[group_start]))
+            group_start = pos
+
+    embedded = 0
+    not_inserted = 0
+    for first_pos, last_pos, article in groups:
+        first_row = start_row + 1 + first_pos
+        last_row = start_row + 1 + last_pos
+        row_count = last_pos - first_pos + 1
+
+        # Preserve a compact, readable offer while giving a single-size product
+        # enough space for the image. Multi-size blocks naturally create height.
+        for row_number in range(first_row, last_row + 1):
+            current = ws.row_dimensions[row_number].height or 15
+            ws.row_dimensions[row_number].height = max(float(current), 18.0)
+            ws.cell(row=row_number, column=image_column).border = border
+        if row_count == 1:
+            ws.row_dimensions[first_row].height = max(ws.row_dimensions[first_row].height or 18, 90)
+
+        if row_count > 1:
+            ws.merge_cells(
+                start_row=first_row,
+                start_column=image_column,
+                end_row=last_row,
+                end_column=image_column,
+            )
+        anchor = ws.cell(row=first_row, column=image_column)
+        anchor.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        image = _fit_excel_image(
+            image_bytes_by_article.get(article, b""),
+            max_width_px=150,
+            max_height_px=max(88, int(row_count * 24)),
+        )
+        if image is None:
+            anchor.value = "Image not found"
+            anchor.font = Font(italic=True, color="6B7280")
+            not_inserted += 1
+            continue
+
+        ws.add_image(image, f"{get_column_letter(image_column)}{first_row}")
+        embedded += 1
+
+    return embedded, not_inserted
+
+
 def write_offer_excel(
     offer_df: pd.DataFrame,
     title: str = "Under Armour Product Offer",
@@ -1865,8 +2126,14 @@ def write_offer_excel(
     export_currency: str = "CZK + EUR",
     vat_rate: float = 0.21,
     price_vat_mode: str = "Excl. VAT",
+    include_product_images: bool = False,
+    product_images: Mapping[str, bytes] | None = None,
 ) -> bytes:
-    """Write the customer-facing English offer workbook."""
+    """Write the customer-facing English offer workbook.
+
+    When enabled, one ``<style-colour>.jpg`` is embedded at the right edge of
+    the sheet and spans all size rows belonging to that style / colour.
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Offer"
@@ -1930,9 +2197,24 @@ def write_offer_excel(
             elif header in integer_columns:
                 cell.number_format = "#,##0"
 
+    image_column = len(offer_df.columns)
+    if include_product_images:
+        image_column += 1
+        _add_product_images_to_offer_sheet(
+            ws=ws,
+            offer_df=offer_df,
+            start_row=start_row,
+            image_column=image_column,
+            image_bytes_by_article=product_images or {},
+            header_fill=header_fill,
+            header_font=header_font,
+            border=border,
+        )
+
     ws.freeze_panes = "A5"
+    filter_end_column = image_column if include_product_images else len(offer_df.columns)
     ws.auto_filter.ref = (
-        f"A{start_row}:{get_column_letter(len(offer_df.columns))}{start_row + len(offer_df)}"
+        f"A{start_row}:{get_column_letter(filter_end_column)}{start_row + len(offer_df)}"
     )
 
     widths = {
@@ -1982,6 +2264,26 @@ def write_offer_excel(
     buffer.seek(0)
     return buffer.getvalue()
 
+
+def _offer_export_signature(
+    offer_df: pd.DataFrame,
+    discount_percent: float,
+    export_currency: str,
+    price_vat_mode: str,
+    include_product_images: bool,
+    folder_share_url: str = "",
+) -> str:
+    """Build a session-only cache key that prevents stale image downloads."""
+    digest = hashlib.sha256()
+    digest.update(offer_df.to_csv(index=False).encode("utf-8"))
+    digest.update(
+        (
+            f"{float(discount_percent):.4f}|{export_currency}|{price_vat_mode}|"
+            f"{include_product_images}|{folder_share_url}"
+        ).encode("utf-8")
+    )
+    return digest.hexdigest()
+
 def unique_sorted(data: pd.DataFrame, col: str) -> list[str]:
     if col not in data.columns:
         return []
@@ -1997,12 +2299,13 @@ def unique_sorted(data: pd.DataFrame, col: str) -> list[str]:
 import streamlit as st
 
 APP_TITLE = "UA Offer Generator"
+APP_VERSION = "v14"
 
 
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
-    st.caption("Generate Under Armour product offers from master data and warehouse files.")
+    st.caption(f"Generate Under Armour product offers from master data and warehouse files. {APP_VERSION} includes OneDrive product-image export.")
 
     with st.sidebar:
         st.header("1. Upload files")
@@ -2437,13 +2740,30 @@ def main() -> None:
         price_vat_mode=price_vat_mode,
     )
 
+    image_export_col, image_note_col = st.columns([1, 2])
+    with image_export_col:
+        include_product_images = st.checkbox(
+            "Include product images in Excel export",
+            value=False,
+            help=(
+                "For every Style / colour, the app downloads <style-colour>.jpg from the configured "
+                "OneDrive / SharePoint folder and inserts one image across all of its size rows."
+            ),
+        )
+    with image_note_col:
+        if include_product_images:
+            st.caption(
+                "The image is inserted as the final right-hand column. It is matched exactly by filename, "
+                "for example Style / colour `6006717-001` → `6006717-001.jpg`."
+            )
+
     file_name = st.text_input("Output file name", value="ua_offer.xlsx")
     if not file_name.lower().endswith(".xlsx"):
         file_name += ".xlsx"
 
     if final_offer_df.empty:
         st.warning("No products match the current criteria.")
-    else:
+    elif not include_product_images:
         excel_bytes = write_offer_excel(
             final_offer_df,
             discount_percent=float(discount_percent),
@@ -2457,6 +2777,80 @@ def main() -> None:
             file_name=file_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    else:
+        image_config = _onedrive_images_config()
+        config_errors = _onedrive_config_errors(image_config)
+        if config_errors:
+            st.error(
+                "Product-image export is not configured yet. Add the missing Streamlit secrets: "
+                + ", ".join(config_errors)
+                + ". See secrets.example.toml and the update guide."
+            )
+        else:
+            article_codes = final_offer_df["Style / colour"].tolist()
+            export_signature = _offer_export_signature(
+                final_offer_df,
+                float(discount_percent),
+                export_currency,
+                price_vat_mode,
+                include_product_images=True,
+                folder_share_url=image_config["folder_share_url"],
+            )
+            if st.button("Prepare Excel offer with product images", type="primary"):
+                try:
+                    with st.spinner(
+                        f"Downloading {len(set(article_codes))} product image(s) from OneDrive / SharePoint..."
+                    ):
+                        image_bytes_by_article, missing_images, image_errors = download_onedrive_product_images(
+                            article_codes,
+                            image_config,
+                        )
+                        excel_bytes = write_offer_excel(
+                            final_offer_df,
+                            discount_percent=float(discount_percent),
+                            export_currency=export_currency,
+                            vat_rate=0.21,
+                            price_vat_mode=price_vat_mode,
+                            include_product_images=True,
+                            product_images=image_bytes_by_article,
+                        )
+                    st.session_state["ua_image_offer_export_v14"] = {
+                        "signature": export_signature,
+                        "excel_bytes": excel_bytes,
+                        "missing_images": missing_images,
+                        "image_errors": image_errors,
+                        "embedded_images": len(image_bytes_by_article),
+                    }
+                except Exception as exc:
+                    st.error(f"Unable to prepare product images: {exc}")
+
+            prepared_export = st.session_state.get("ua_image_offer_export_v14", {})
+            if prepared_export.get("signature") == export_signature:
+                embedded = int(prepared_export.get("embedded_images", 0))
+                missing_images = list(prepared_export.get("missing_images", []))
+                image_errors = list(prepared_export.get("image_errors", []))
+                st.success(f"Excel offer prepared with {embedded} embedded product image(s).")
+                if missing_images:
+                    preview_missing = ", ".join(missing_images[:12])
+                    suffix = " …" if len(missing_images) > 12 else ""
+                    st.warning(
+                        f"No JPG was found for {len(missing_images)} Style / colour item(s): "
+                        f"{preview_missing}{suffix}. The Excel file marks these rows as Image not found."
+                    )
+                if image_errors:
+                    preview_errors = ", ".join(image_errors[:8])
+                    suffix = " …" if len(image_errors) > 8 else ""
+                    st.warning(
+                        f"Some images could not be downloaded: {preview_errors}{suffix}."
+                    )
+                st.download_button(
+                    label="Download Excel offer with product images",
+                    data=prepared_export["excel_bytes"],
+                    file_name=file_name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                st.info("Click Prepare Excel offer with product images to create the downloadable workbook.")
 
     with st.expander("Current filter logic"):
         st.markdown(
@@ -2500,6 +2894,11 @@ def main() -> None:
             **Final discount, currency and VAT mode**: choose CZK, EUR or both currencies, then whether the final
             discounted price is **Excl. VAT** or **Incl. VAT**. The first variant is `RRP × (1 − discount) / 1.21`;
             the second is `RRP × (1 − discount)`. VAT is fixed at 21%.
+
+            **Product images in Excel**: when enabled, the app looks up `Style / colour.jpg` in the configured
+            OneDrive / SharePoint folder and adds a final **Product image** column. One image is embedded and vertically
+            grouped across all size rows of each style / colour. A missing image is explicitly marked as `Image not found`.
+            Images are downloaded only for products in the final offer.
 
             **Central warehouse** = sum of the first two `Week` columns in the central warehouse file.
             """
