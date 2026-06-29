@@ -232,8 +232,10 @@ def prepare_master(master_df: pd.DataFrame) -> pd.DataFrame:
         "Artikl": ["Artikl", "Article", "ARTICLE_GENERIC"],
         "Size": ["Size US", "US Size", "Size", "Charakter.1", "Charakter"],
         "Název": ["Název", "Nazev", "Name", "ARTICLE_GENERIC_DESC"],
-        "MOC CZK": ["MOC CZK", "MOC", "Prodejní cena"],
-        "MOC EUR": ["MOC EUR", "EUR RRP", "RRP EUR"],
+        # Master exports commonly use either MOC CZK / MOC EUR or CZK MOC / EUR MOC.
+        # Keep both variants so retail prices are retained in preview and export.
+        "MOC CZK": ["MOC CZK", "CZK MOC", "CZK RRP", "RRP CZK", "MOC", "Prodejní cena"],
+        "MOC EUR": ["MOC EUR", "EUR MOC", "EUR RRP", "RRP EUR"],
         "Division": ["Division"],
         "Gender": ["Gender"],
         "Silhouette": ["Silhouette"],
