@@ -122,6 +122,37 @@ CORE_SIZE_RUNS = {
     "womens": {"XS", "S", "M", "L", "XL"},
 }
 
+# Full footwear ranges use the US sizes held in the master data. Both whole
+# and half sizes are required because the offer should be commercially usable
+# as a complete running-shoe size run.
+FOOTWEAR_SIZE_RUNS = {
+    "mens": {7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0, 10.5, 11.0, 11.5, 12.0, 12.5},
+    "womens": {5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0, 10.5, 11.0},
+}
+
+WAREHOUSE_COLUMNS = (
+    "Local warehouse 101",
+    "Local warehouse 501",
+    "Central warehouse",
+)
+LOCAL_WAREHOUSE_COLUMNS = (
+    "Local warehouse 101",
+    "Local warehouse 501",
+)
+
+
+def selected_warehouse_columns(selected_warehouses: Sequence[str] | None) -> list[str]:
+    """Return the active availability sources in their standard order.
+
+    When the user removes Central warehouse, the returned list contains only
+    Local warehouse 101 and Local warehouse 501. An empty value falls back to
+    the local warehouses rather than silently putting Central warehouse back
+    into availability calculations.
+    """
+    requested = set(selected_warehouses or ())
+    selected = [column for column in WAREHOUSE_COLUMNS if column in requested]
+    return selected if selected else list(LOCAL_WAREHOUSE_COLUMNS)
+
 
 def normalize_ean(value) -> str:
     """Return a safe text EAN without decimals or spaces."""
@@ -288,6 +319,7 @@ NO_STOCK_IMPORT_COLUMNS = [
     "Local warehouse 101",
     "Local warehouse 501",
     "Central warehouse",
+    "Dostupnost ve vybraných skladech",
     "Celkem ks všechny sklady",
     "MOC CZK",
     "MOC EUR",
@@ -320,21 +352,22 @@ def _first_nonempty_value(group: pd.DataFrame, column: str):
 def imported_no_stock_report(
     data: pd.DataFrame,
     style_selectors: Sequence[object],
+    selected_warehouses: Sequence[str] = WAREHOUSE_COLUMNS,
 ) -> pd.DataFrame:
-    """Build one row per imported style-colour with zero stock everywhere.
-
-    The report intentionally ignores the currently selected warehouse filter.
-    It checks the complete combined stock (101 + 501 + Central) so it answers
-    whether an imported item is unavailable at *all* uploaded warehouses.
+    """Build one row per imported style-colour with zero selected availability.
 
     Exact imported values (for example ``1326799-036``) inspect that one
-    style-colour. A base style (``1326799``) expands to all its colours and
-    reports every colour that has zero stock everywhere.
+    style-colour. A base style (``1326799``) expands to all its colours. The
+    active warehouse choices decide whether an item is unavailable: when
+    Central warehouse is removed, only Local warehouse 101 and 501 are used
+    for this decision. The report still displays all three physical stock
+    columns so a user can see stock that exists only in an excluded source.
     """
     selectors = normalize_style_selectors(style_selectors)
     if not selectors or data.empty:
         return pd.DataFrame(columns=NO_STOCK_IMPORT_COLUMNS)
 
+    selected = selected_warehouse_columns(selected_warehouses)
     article_keys = _normalized_article_series(data)
     style_codes = clean_text(data["Style code"]).str.upper()
 
@@ -359,8 +392,9 @@ def imported_no_stock_report(
         stock_101 = int(round(to_number(group["Local warehouse 101"]).sum()))
         stock_501 = int(round(to_number(group["Local warehouse 501"]).sum()))
         stock_central = int(round(to_number(group["Central warehouse"]).sum()))
+        stock_selected = int(round(sum(to_number(group[column]).sum() for column in selected)))
         stock_total = stock_101 + stock_501 + stock_central
-        if stock_total != 0:
+        if stock_selected != 0:
             continue
 
         sizes = sorted(
@@ -391,6 +425,7 @@ def imported_no_stock_report(
                 "Local warehouse 101": stock_101,
                 "Local warehouse 501": stock_501,
                 "Central warehouse": stock_central,
+                "Dostupnost ve vybraných skladech": stock_selected,
                 "Celkem ks všechny sklady": stock_total,
                 "MOC CZK": float(to_number(group["MOC CZK"]).max()),
                 "MOC EUR": float(to_number(group["MOC EUR"]).max()),
@@ -498,7 +533,7 @@ def write_import_no_stock_excel(
     write_sheet(
         "Unavailable imports",
         title,
-        "Products exist in master data but have zero total quantity across Local warehouse 101, Local warehouse 501 and Central warehouse.",
+        "Products exist in master data but have zero availability in the active warehouse sources.",
         to_english_display(report),
     )
 
@@ -544,6 +579,7 @@ SUBSTITUTION_TARGET_COLUMNS = [
     "Composition",
     "MOC CZK",
     "MOC EUR",
+    "Dostupnost ve vybraných skladech",
     "Celkem ks všechny sklady",
     "Dostupné velikosti ve vybraných skladech",
 ]
@@ -581,7 +617,7 @@ SUBSTITUTION_ALTERNATIVE_COLUMNS = [
     "Top style",
 ]
 
-ALTERNATIVE_ENGINE_VERSION = "v13"
+ALTERNATIVE_ENGINE_VERSION = "v15"
 
 
 
@@ -1092,12 +1128,16 @@ def imported_unavailable_with_alternatives(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Create an unavailable-import list and ranked available alternatives.
 
-    A requested item enters the first table only if it has zero stock across
-    *all* uploaded warehouses. Recommendations then use the availability
-    sources selected in the current offer criteria, so they can immediately be
-    added to the offer.
+    A requested item enters the first table only if it has zero availability in
+    the warehouses selected in the current offer criteria. Therefore removing
+    Central warehouse evaluates both the requested product and alternatives
+    against Local warehouse 101 and Local warehouse 501 only.
     """
-    unavailable = imported_no_stock_report(data, style_selectors).copy()
+    unavailable = imported_no_stock_report(
+        data,
+        style_selectors,
+        selected_warehouses=selected_warehouses,
+    ).copy()
     if unavailable.empty:
         return (
             pd.DataFrame(columns=SUBSTITUTION_TARGET_COLUMNS),
@@ -1322,7 +1362,7 @@ def write_import_substitution_excel(
     write_sheet(
         "Unavailable imports",
         title,
-        "Imported style-colours that exist in master data but have zero stock in Local warehouse 101, Local warehouse 501 and Central warehouse.",
+        "Imported style-colours that exist in master data but have zero availability in the sources selected for the current offer.",
         unavailable,
     )
     write_sheet(
@@ -1550,32 +1590,20 @@ def product_type_mask(
     data: pd.DataFrame,
     product_types: Sequence[str],
 ) -> pd.Series:
+    """Filter the three primary UA product divisions exposed in the UI."""
     if not product_types:
         return pd.Series(True, index=data.index)
 
+    division = clean_text(data["Division"]).str.casefold()
     masks: list[pd.Series] = []
-    division_apparel = data["Division"].str.casefold().eq("apparel")
     for product_type in product_types:
-        if product_type == "Technical T-shirts":
-            top_mask = data["Silhouette"].str.contains("tops", case=False, na=False)
-            detail_mask = data["Detail silhouette"].str.contains(
-                "sleeve|sleeveless|tee|t-shirt",
-                case=False,
-                na=False,
-                regex=True,
-            )
-            mask = division_apparel & top_mask & detail_mask
-            masks.append(mask)
-        elif product_type == "Shorts":
-            detail_mask = data["Detail silhouette"].str.contains("shorts", case=False, na=False)
-            silhouette_mask = data["Silhouette"].str.contains("shorts", case=False, na=False)
-            masks.append(division_apparel & (detail_mask | silhouette_mask))
-        elif product_type == "Tops":
-            masks.append(division_apparel & data["Silhouette"].str.contains("tops", case=False, na=False))
-        elif product_type == "Footwear":
-            masks.append(data["Division"].str.contains("footwear", case=False, na=False))
-        elif product_type == "Accessories":
-            masks.append(data["Division"].str.contains("accessories", case=False, na=False))
+        normalized = str(product_type).strip().casefold()
+        if normalized == "apparel":
+            masks.append(division.eq("apparel"))
+        elif normalized == "footwear":
+            masks.append(division.eq("footwear"))
+        elif normalized in {"accessories", "accesories"}:
+            masks.append(division.str.contains("accessor", na=False))
 
     if not masks:
         return pd.Series(True, index=data.index)
@@ -1623,18 +1651,28 @@ def size_sort_value(size: str) -> int:
         return 1000
 
 
-def add_stock_metrics(data: pd.DataFrame, selected_warehouses: Sequence[str]) -> pd.DataFrame:
-    """Calculate the style/colour aggregate and full-size-run status.
+def footwear_size_value(size: object) -> float | None:
+    """Convert a US footwear size to a comparable half-size number."""
+    text = str(size or "").strip().upper().replace(",", ".")
+    match = re.fullmatch(r"(\d+(?:\.5|\.0)?)", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
 
-    Every metric is calculated before the final row filters. Therefore the
-    displayed style/colour stock is not reduced merely because another size is
-    hidden by the minimum-per-EAN setting.
+
+def add_stock_metrics(data: pd.DataFrame, selected_warehouses: Sequence[str]) -> pd.DataFrame:
+    """Calculate selected availability, style-colour stock and full size runs.
+
+    Every metric is calculated before the final row filters. Removing Central
+    warehouse means all commercial availability metrics use only Local 101 and
+    Local 501. Full footwear runs are assessed in US sizes: Mens 7–12.5 and
+    Womens 5–11, including every half size.
     """
     out = data.copy()
-    warehouse_cols = ["Local warehouse 101", "Local warehouse 501", "Central warehouse"]
-    selected = [col for col in selected_warehouses if col in warehouse_cols]
-    if not selected:
-        selected = warehouse_cols
+    selected = selected_warehouse_columns(selected_warehouses)
 
     out["Dostupnost ve vybraných skladech"] = out[selected].sum(axis=1).round(0).astype(int)
     out["_core_size"] = out["Size"].map(standard_size)
@@ -1652,14 +1690,33 @@ def add_stock_metrics(data: pd.DataFrame, selected_warehouses: Sequence[str]) ->
     for artikel, group in out.groupby("Artikl", sort=False):
         genders = clean_text(group["Gender"]).str.casefold().unique().tolist()
         gender = genders[0] if genders else ""
-        required = CORE_SIZE_RUNS.get(gender)
-        if not required:
-            full_flags[artikel] = None
-            continue
-        available = set(
-            group.loc[group["Dostupnost ve vybraných skladech"] > 0, "_core_size"].tolist()
-        )
-        full_flags[artikel] = required.issubset(available)
+        divisions = clean_text(group["Division"]).str.casefold().unique().tolist()
+        is_footwear = any("footwear" in division for division in divisions)
+
+        if is_footwear:
+            required_footwear = FOOTWEAR_SIZE_RUNS.get(gender)
+            if not required_footwear:
+                full_flags[artikel] = None
+                continue
+            available_footwear = {
+                value
+                for value in group.loc[
+                    group["Dostupnost ve vybraných skladech"] > 0, "Size"
+                ].map(footwear_size_value).tolist()
+                if value is not None
+            }
+            full_flags[artikel] = required_footwear.issubset(available_footwear)
+        else:
+            required_apparel = CORE_SIZE_RUNS.get(gender)
+            if not required_apparel:
+                full_flags[artikel] = None
+                continue
+            available_apparel = set(
+                group.loc[
+                    group["Dostupnost ve vybraných skladech"] > 0, "_core_size"
+                ].tolist()
+            )
+            full_flags[artikel] = required_apparel.issubset(available_apparel)
 
     out["_full_sizerun"] = out["Artikl"].map(full_flags)
     out["Plný sizerun"] = out["_full_sizerun"].map(
@@ -1670,8 +1727,8 @@ def add_stock_metrics(data: pd.DataFrame, selected_warehouses: Sequence[str]) ->
 
 def apply_filters(
     data: pd.DataFrame,
-    product_types: Sequence[str] = ("Technical T-shirts",),
-    genders: Sequence[str] = ("Mens",),
+    product_types: Sequence[str] = (),
+    genders: Sequence[str] = (),
     colors: Sequence[str] = ("Black", "Dark Blue"),
     price_min: float = 0,
     price_max: float = 999,
@@ -1683,6 +1740,7 @@ def apply_filters(
     min_article_sizes: int = 1,
     seasons: Sequence[str] = (),
     end_uses: Sequence[str] = (),
+    silhouettes: Sequence[str] = (),
     detail_silhouettes: Sequence[str] = (),
     fits: Sequence[str] = (),
     co_values: Sequence[str] = (),
@@ -1723,6 +1781,8 @@ def apply_filters(
             mask &= data["Season"].isin(seasons)
         if end_uses:
             mask &= data["End use"].isin(end_uses)
+        if silhouettes:
+            mask &= data["Silhouette"].isin(silhouettes)
         if detail_silhouettes:
             mask &= data["Detail silhouette"].isin(detail_silhouettes)
         if fits:
@@ -2046,6 +2106,7 @@ def main() -> None:
     col1, col2, col3, col4 = st.columns(4)
 
     gender_options = unique_sorted(data, "Gender")
+    silhouette_options = unique_sorted(data, "Silhouette")
     detail_silhouette_options = unique_sorted(data, "Detail silhouette")
     fit_options = unique_sorted(data, "Fit")
     rrp_eur_max_default = int(max(float(data["MOC EUR"].max()), 999))
@@ -2054,8 +2115,9 @@ def main() -> None:
     with col1:
         product_types = st.multiselect(
             "Product type",
-            ["Technical T-shirts", "Shorts", "Tops", "Footwear", "Accessories"],
-            default=["Technical T-shirts"],
+            ["Apparel", "Footwear", "Accessories"],
+            default=[],
+            help="Filters the Division field in master data. Leave blank to include every product division.",
         )
         genders = st.multiselect(
             "Gender",
@@ -2094,7 +2156,15 @@ def main() -> None:
             "Availability source used for filtering",
             ["Local warehouse 101", "Local warehouse 501", "Central warehouse"],
             default=["Local warehouse 101", "Local warehouse 501", "Central warehouse"],
+            help=(
+                "All availability, full size-run checks and recommendations use only the selected sources. "
+                "Remove Central warehouse to use Local warehouse 101 and Local warehouse 501 only."
+            ),
         )
+        if not selected_warehouses:
+            st.warning("Select at least one availability source. The app otherwise defaults to the two local warehouses.")
+        elif "Central warehouse" not in selected_warehouses:
+            st.caption("Central warehouse excluded: availability is calculated from Local warehouse 101 + Local warehouse 501 only.")
         min_total_available = st.number_input(
             "Minimum selected availability per EAN",
             min_value=0,
@@ -2120,7 +2190,11 @@ def main() -> None:
         only_full_sizerun = st.checkbox(
             "Only full size run",
             value=False,
-            help="Mens: S–2XL. Womens: XS–XL. Every core size must have stock in the selected warehouses.",
+            help=(
+                "Apparel — Mens: S–2XL; Womens: XS–XL. Footwear (US) — Mens: 7–12.5; "
+                "Womens: 5–11. Every whole and half size in the required range must have stock "
+                "in the selected warehouses."
+            ),
         )
 
     with col4:
@@ -2137,6 +2211,7 @@ def main() -> None:
         )
         seasons = st.multiselect("Season", unique_sorted(data, "Season"), default=[])
         end_uses = st.multiselect("End use", unique_sorted(data, "End use"), default=[])
+        silhouettes = st.multiselect("Silhouette", silhouette_options, default=[])
         detail_silhouettes = st.multiselect(
             "Sleeve / detail silhouette",
             detail_silhouette_options,
@@ -2210,11 +2285,12 @@ def main() -> None:
         if not unavailable_import_df.empty:
             st.warning(
                 f"{len(unavailable_import_df)} imported style / colour item(s) exist in master data "
-                "but have zero stock across all uploaded warehouses."
+                "but have zero availability in the selected warehouse source(s)."
             )
             with st.expander("Unavailable imported products and recommended alternatives", expanded=False):
                 st.caption(
                     f"Alternatives {ALTERNATIVE_ENGINE_VERSION}: the exact unavailable style / colour is always excluded. "
+                    "A product is treated as unavailable only when it has zero availability in the selected warehouse sources. "
                     "Depending on the selected strategy, the app offers either the same style in another available colour, "
                     "or another available style in the same colour. For a different style, it prioritises product family "
                     "(for example, Polo), gender, division, end use and silhouette; then it ranks fit, material, segment, "
@@ -2332,6 +2408,7 @@ def main() -> None:
         min_article_sizes=int(min_article_sizes),
         seasons=seasons,
         end_uses=end_uses,
+        silhouettes=silhouettes,
         detail_silhouettes=detail_silhouettes,
         fits=fits,
         co_values=co_values,
@@ -2469,14 +2546,23 @@ def main() -> None:
             `Composition` is Cotton. Polyester & performance fibres means a composition without cotton
             that contains common performance fibres such as polyester, elastane, nylon or polyamide.
             Both selected includes both groups; neither selected leaves material unrestricted.
-            The product type **Technical T-shirts** defines only the product category, not the material.
+            **Product type** filters the master-data `Division` field and offers Apparel, Footwear and Accessories.
+            The material filters remain independent from this selection.
+
+            **Silhouette** filters the master-data `Silhouette` field. The existing `Sleeve / detail silhouette` filter
+            remains available for more specific cuts.
 
             **Total units / style-colour**: total stock across all EAN rows sharing `Artikl`
             (UA style + colour), calculated from the currently selected warehouses. It is shown in every export.
 
-            **Full size run**: Mens requires S, M, L, XL and 2XL; Womens requires XS, S, M, L and XL.
-            Each of those sizes must have stock in the selected warehouses. UA size labels SM / MD / LG and XXL
-            are converted automatically.
+            **Full size run**: Apparel — Mens requires S, M, L, XL and 2XL; Womens requires XS, S, M, L and XL.
+            Footwear uses US sizes: Mens requires every whole and half size from 7 through 12.5; Womens requires every
+            whole and half size from 5 through 11. Every required size must have stock in the selected warehouses.
+            UA apparel size labels SM / MD / LG and XXL are converted automatically.
+
+            **Warehouse sources**: all availability totals, full size-run checks, unavailable-import status and
+            alternative recommendations use only the sources selected in **Availability source used for filtering**.
+            Removing Central warehouse means only Local warehouse 101 and Local warehouse 501 are used.
 
             **Style import (XLSX)**: insert styles in cells below one another in the first worksheet.
             `1326799` returns all colours of the base style; `1326799-036` (or `1326799/036`) returns only that
@@ -2484,8 +2570,8 @@ def main() -> None:
             gender, material, Top styles, colour, RRP ranges, season, end use, silhouette, fit, C/O, minimum
             availability, minimum style/colour stock, minimum number of sizes and Full size run. Warehouse selection
             remains active only for calculating and displaying availability; it does not remove imported products
-            from the result. If imported products are present in the master but have **zero stock in all three uploaded
-            warehouses**, an immediate list and a download appear below the import. The file contains unavailable imported
+            from the result. If imported products are present in the master but have **zero availability in the selected
+            warehouse sources**, an immediate list and a download appear below the import. The file contains unavailable imported
             products, ranked available alternatives and a separate sheet for valid imported values not found in master data.
             Alternatives use the warehouses selected for the current offer. The **exact unavailable style / colour** is
             always excluded, but a different available colourway of the same style is valid when the customer wants to
