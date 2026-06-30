@@ -1502,6 +1502,220 @@ def aggregate_central(central_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]
     return tmp.groupby("EAN", as_index=False)["Central warehouse"].sum(), week_cols
 
 
+COMBINED_LOCAL_STOCK_COLUMNS = [
+    "Artikl",
+    "Charakter.1",
+    "Název",
+    "Qty 101",
+    "Qty 501",
+    "Prodejní cena",
+    "Netto",
+    "Gender",
+    "Segment",
+    "Division",
+    "End use",
+    "Silhouette",
+    "Char1 - název",
+    "Fit",
+    "Detail silhouette",
+    "Season",
+    "C/O",
+    "EAN poslední",
+    "Color",
+    "Materiál",
+    "Kód zboží",
+    "Hmotnost",
+    "Země původu",
+]
+
+# Source files normally contain one physical quantity column named ``Qty``.
+# The combined export deliberately keeps both warehouses separate and therefore
+# adds ``Qty 101`` and ``Qty 501`` only in the downloadable output.
+LOCAL_STOCK_QTY_ALIASES = [
+    "Qty", "Quantity", "Množství", "Mnozstvi", "Počet", "Pocet",
+    "Stock", "Available",
+]
+
+# The local 101 / 501 files normally already follow the exact Czech stock
+# layout. Aliases keep the download functional if an export uses a common
+# English variation of a header.
+COMBINED_LOCAL_STOCK_ALIASES = {
+    "Artikl": ["Artikl", "Article", "ARTICLE_GENERIC"],
+    "Charakter.1": ["Charakter.1", "Charakter", "Size", "Size US", "US Size"],
+    "Název": ["Název", "Nazev", "Name", "ARTICLE_GENERIC_DESC"],
+    "Prodejní cena": ["Prodejní cena", "MOC CZK", "CZK MOC", "RRP CZK", "MOC"],
+    "Netto": ["Netto", "Net price", "Net price CZK"],
+    "Gender": ["Gender"],
+    "Segment": ["Segment"],
+    "Division": ["Division"],
+    "End use": ["End use", "End Use"],
+    "Silhouette": ["Silhouette"],
+    "Char1 - název": ["Char1 - název", "Char1 - nazev", "Char1 name"],
+    "Fit": ["Fit"],
+    "Detail silhouette": ["Detail silhouette", "Detail Silhouette"],
+    "Season": ["Season"],
+    "C/O": ["C/O", "CO"],
+    "EAN poslední": ["EAN poslední", "EAN posledni", "EAN"],
+    "Color": ["Color", "Colour", "Color group", "Colour group"],
+    "Materiál": ["Materiál", "Material", "Composition"],
+    "Kód zboží": ["Kód zboží", "Kod zbozi", "Commodity code", "HS code"],
+    "Hmotnost": ["Hmotnost", "Weight"],
+    "Země původu": ["Země původu", "Zeme puvodu", "Country of origin"],
+}
+
+
+def _first_non_empty_value(series: pd.Series):
+    """Return the first meaningful source value, preserving source priority."""
+    for value in series:
+        if pd.isna(value):
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return ""
+
+
+def _normalize_local_stock_source(stock_df: pd.DataFrame) -> pd.DataFrame:
+    """Map one local-stock upload into its descriptive EAN-level fields.
+
+    Source quantities stay as their true numeric values. No presentation rule
+    (such as displaying ``100+``) is applied anywhere in this export path.
+    """
+    out = pd.DataFrame(index=stock_df.index)
+    for output_column, aliases in COMBINED_LOCAL_STOCK_ALIASES.items():
+        source_column = find_col(stock_df, aliases, required=False)
+        out[output_column] = "" if source_column is None else stock_df[source_column]
+
+    qty_column = find_col(stock_df, LOCAL_STOCK_QTY_ALIASES, required=False)
+    out["_source_qty"] = 0 if qty_column is None else to_number(stock_df[qty_column]).round(0).astype(int)
+    out["_EAN_KEY"] = out["EAN poslední"].map(normalize_ean)
+    out["EAN poslední"] = out["_EAN_KEY"]
+    return out[out["_EAN_KEY"] != ""].copy()
+
+
+def build_combined_local_stock(
+    local101_df: pd.DataFrame,
+    local501_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Create one EAN-level local-stock file with separate 101 and 501 columns.
+
+    ``Qty 101`` and ``Qty 501`` retain the actual, uncapped quantity from each
+    uploaded warehouse independently. The function never adds both values into
+    a combined quantity. Descriptive fields preferentially come from warehouse
+    101 and use warehouse 501 only to fill blanks. Rows are retained when at
+    least one of the two local warehouses has positive stock.
+    """
+    source_101 = _normalize_local_stock_source(local101_df)
+    source_501 = _normalize_local_stock_source(local501_df)
+    combined = pd.concat([source_101, source_501], ignore_index=True, sort=False)
+    if combined.empty:
+        return pd.DataFrame(columns=COMBINED_LOCAL_STOCK_COLUMNS)
+
+    qty_101_by_ean = source_101.groupby("_EAN_KEY")["_source_qty"].sum().to_dict()
+    qty_501_by_ean = source_501.groupby("_EAN_KEY")["_source_qty"].sum().to_dict()
+
+    records: list[dict] = []
+    for ean, group in combined.groupby("_EAN_KEY", sort=False):
+        qty_101 = int(qty_101_by_ean.get(ean, 0))
+        qty_501 = int(qty_501_by_ean.get(ean, 0))
+        if qty_101 <= 0 and qty_501 <= 0:
+            continue
+
+        row: dict = {"EAN poslední": ean, "Qty 101": qty_101, "Qty 501": qty_501}
+        for column in COMBINED_LOCAL_STOCK_ALIASES:
+            if column == "EAN poslední":
+                row[column] = ean
+            else:
+                row[column] = _first_non_empty_value(group[column])
+        records.append(row)
+
+    result = pd.DataFrame(records, columns=COMBINED_LOCAL_STOCK_COLUMNS)
+    if result.empty:
+        return pd.DataFrame(columns=COMBINED_LOCAL_STOCK_COLUMNS)
+
+    result["_article_sort"] = clean_text(result["Artikl"])
+    result["_size_sort"] = result["Charakter.1"].map(size_sort_value)
+    result = result.sort_values(
+        ["_article_sort", "_size_sort", "EAN poslední"],
+        kind="stable",
+    ).drop(columns=["_article_sort", "_size_sort"])
+    result["Qty 101"] = to_number(result["Qty 101"]).round(0).astype(int)
+    result["Qty 501"] = to_number(result["Qty 501"]).round(0).astype(int)
+    result["EAN poslední"] = result["EAN poslední"].astype(str)
+    return result.reset_index(drop=True)
+
+
+def write_combined_local_stock_excel(stock_df: pd.DataFrame) -> bytes:
+    """Write the combined 101 + 501 stock file in the attached-stock layout."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Local stock 101 + 501"
+
+    header_fill = PatternFill("solid", fgColor="ED1C24")
+    header_font = Font(color="FFFFFF", bold=True)
+    thin_side = Side(style="thin", color="D9D9D9")
+    border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+    for column_index, column_name in enumerate(COMBINED_LOCAL_STOCK_COLUMNS, start=1):
+        cell = ws.cell(row=1, column=column_index, value=column_name)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+
+    for row_index, row in enumerate(stock_df[COMBINED_LOCAL_STOCK_COLUMNS].itertuples(index=False), start=2):
+        for column_index, value in enumerate(row, start=1):
+            header = COMBINED_LOCAL_STOCK_COLUMNS[column_index - 1]
+            cell = ws.cell(row=row_index, column=column_index, value=value)
+            cell.border = border
+            cell.alignment = Alignment(vertical="center")
+            if header == "EAN poslední":
+                cell.number_format = "@"
+            elif header in {"Qty 101", "Qty 501"}:
+                cell.number_format = "0"
+            elif header in {"Prodejní cena", "Netto"}:
+                cell.number_format = "#,##0.00"
+            elif header == "Hmotnost":
+                cell.number_format = "0.000"
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(COMBINED_LOCAL_STOCK_COLUMNS))}{len(stock_df) + 1}"
+    ws.row_dimensions[1].height = 28
+
+    widths = {
+        "Artikl": 18,
+        "Charakter.1": 12,
+        "Název": 34,
+        "Qty 101": 11,
+        "Qty 501": 11,
+        "Prodejní cena": 16,
+        "Netto": 12,
+        "Gender": 14,
+        "Segment": 14,
+        "Division": 16,
+        "End use": 18,
+        "Silhouette": 16,
+        "Char1 - název": 16,
+        "Fit": 16,
+        "Detail silhouette": 24,
+        "Season": 12,
+        "C/O": 10,
+        "EAN poslední": 18,
+        "Color": 16,
+        "Materiál": 46,
+        "Kód zboží": 16,
+        "Hmotnost": 12,
+        "Země původu": 16,
+    }
+    for column_index, column_name in enumerate(COMBINED_LOCAL_STOCK_COLUMNS, start=1):
+        ws.column_dimensions[get_column_letter(column_index)].width = widths.get(column_name, 14)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def prepare_master(master_df: pd.DataFrame) -> pd.DataFrame:
     """Standardize master-data headers while accepting the current Czech export."""
     col_map = {
@@ -2101,6 +2315,39 @@ def main() -> None:
         f"Loaded {len(data):,} EAN rows from master data. "
         f"Central availability = {' + '.join(central_cols)}."
     )
+
+    with st.expander("Combined local stock 101 + 501 (EAN-level)", expanded=False):
+        st.caption(
+            "Creates one local-stock XLSX in the supplied warehouse format, with one row per EAN and separate "
+            "Qty 101 and Qty 501 columns. Quantities stay as the full actual values from each uploaded local stock "
+            "file; they are not summed and are never displayed as 100+. Rows where both local warehouses are zero "
+            "are excluded. This download is independent of the offer filters and Central warehouse."
+        )
+        try:
+            combined_local_stock_df = build_combined_local_stock(local101_df, local501_df)
+        except Exception as exc:
+            st.error(f"Combined local stock export failed: {exc}")
+        else:
+            stock_kpi1, stock_kpi2, stock_kpi3 = st.columns(3)
+            stock_kpi1.metric("EAN rows in local-stock export", f"{len(combined_local_stock_df):,}")
+            stock_kpi2.metric(
+                "Total units — warehouse 101",
+                f"{int(combined_local_stock_df['Qty 101'].sum()) if not combined_local_stock_df.empty else 0:,}",
+            )
+            stock_kpi3.metric(
+                "Total units — warehouse 501",
+                f"{int(combined_local_stock_df['Qty 501'].sum()) if not combined_local_stock_df.empty else 0:,}",
+            )
+            if combined_local_stock_df.empty:
+                st.warning("No EAN with positive stock was found in Local warehouse 101 or Local warehouse 501.")
+            else:
+                combined_local_stock_bytes = write_combined_local_stock_excel(combined_local_stock_df)
+                st.download_button(
+                    label="Download local stock 101 + 501 (separate quantities)",
+                    data=combined_local_stock_bytes,
+                    file_name="local_stock_101_501_separate_quantities.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
     st.header("2. Offer criteria")
     col1, col2, col3, col4 = st.columns(4)
